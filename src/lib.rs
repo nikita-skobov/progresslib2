@@ -212,6 +212,8 @@ mod tests {
     use super::*;
     use futures_timer::Delay;
     use lazy_static::lazy_static;
+    use tokio::prelude::*;
+    use tokio::runtime::Runtime;
 
     async fn download_something(secs: u64) -> TaskResult {
         let duration = std::time::Duration::from_secs(secs);
@@ -220,7 +222,6 @@ mod tests {
         Ok(())
     }
 
-    // TODO: instantiate tokio otherwise start will fail.
     #[test]
     fn can_call_start() {
         let future = download_something(3);
@@ -234,7 +235,10 @@ mod tests {
             );
         }
 
-        myprogitem.start(String::from("reeeee"), &PROGHOLDER);
+        let mut rt = Runtime::new().unwrap();
+        rt.block_on(async move {
+            myprogitem.start(String::from("reeeee"), &PROGHOLDER);
+        });
     }
 
     #[test]
