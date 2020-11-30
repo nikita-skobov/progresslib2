@@ -11,15 +11,15 @@ use std::task::{Context, Poll};
 type TaskResult = Result<(), String>;
 type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 
-pub struct Stage<S: Debug> {
-    name: S,
+pub struct Stage {
+    name: Option<Box<dyn Debug>>,
     task: Option<PinBoxFuture>,
 }
 
-impl<S: Debug> Stage<S> {
-    pub fn new(name: S) -> Self {
+impl Stage {
+    pub fn new(name: impl Debug + 'static) -> Self {
         Stage {
-            name,
+            name: Some(Box::new(name)),
             task: None,
         }
     }
@@ -44,14 +44,14 @@ impl<S: Debug> Stage<S> {
     }
 
     pub fn make<F: Future<Output = TaskResult> + Send + 'static>(
-        name: S,
+        name: impl Debug + 'static,
         future: F,
     ) -> Self {
         Stage::new(name).set_task_from_future(future)
     }
 
     pub fn make_simple<F: Future<Output = ()> + Send + 'static>(
-        name: S,
+        name: impl Debug + 'static,
         future: F,
     ) -> Self {
         Stage::new(name).set_task_from_future(async move {
@@ -61,7 +61,7 @@ impl<S: Debug> Stage<S> {
     }
 }
 
-impl<S: Debug> Debug for Stage<S> {
+impl Debug for Stage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Stage")
             .field("name", &self.name)
@@ -74,14 +74,14 @@ impl<S: Debug> Debug for Stage<S> {
 }
 
 #[derive(Debug, Default)]
-pub struct ProgressItem<S1: Debug, S2: Debug> {
-    name: S1,
-    stages: VecDeque<Stage<S2>>,
+pub struct ProgressItem<S: Debug> {
+    name: S,
+    stages: VecDeque<Stage>,
     started: bool,
 }
 
-impl<S1: Debug, S2: Debug> ProgressItem<S1, S2> {
-    pub fn new(name: S1) -> Self {
+impl<S: Debug> ProgressItem<S> {
+    pub fn new(name: S) -> Self {
         ProgressItem {
             name,
             stages: VecDeque::new(),
@@ -89,7 +89,7 @@ impl<S1: Debug, S2: Debug> ProgressItem<S1, S2> {
         }
     }
 
-    pub fn register_stage<T: Into<Stage<S2>>>(&mut self, stage: T) {
+    pub fn register_stage<T: Into<Stage>>(&mut self, stage: T) {
         if !self.started {
             self.stages.push_back(stage.into());
         }
@@ -128,14 +128,15 @@ mod tests {
         pub enum ThisEnum {
             Download3,
             Download6,
-            DownloadDone,
         }
         let future3 = download_something(3);
         let future6 = download_something(6);
         let done = async { };
         let mystage3 = Stage::make(ThisEnum::Download3, future3);
         let mystage6 = Stage::make(ThisEnum::Download6, future6);
-        let mystagedone = Stage::make_simple(ThisEnum::DownloadDone, done);
+        // the name of the stage is put into a box, so it doesnt all
+        // have to be of the same type
+        let mystagedone = Stage::make_simple("DONE!", done);
 
         // note the name of the progress item is a string
         // even though the name of the tasks are enums. this is ok
