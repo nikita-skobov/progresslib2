@@ -63,18 +63,6 @@ impl Stage {
     }
 }
 
-impl Debug for Stage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Stage")
-            .field("name", &self.name)
-            .field("future", match &self.task {
-                Some(_) => &"set",
-                None => &"not set",
-            })
-            .finish()
-    }
-}
-
 #[derive(Debug)]
 pub struct ProgressError {
     name: Option<String>,
@@ -82,13 +70,14 @@ pub struct ProgressError {
     error_string: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ProgressItem<S: Debug> {
     name: S,
     stages: VecDeque<Stage>,
     started: bool,
     numstages: usize,
     current_stage: Option<(usize, Stage)>,
+    progress: u8,
     errored: Option<ProgressError>,
     done: bool,
 }
@@ -104,6 +93,40 @@ impl<S: Debug + Send> ProgressItem<S> {
             current_stage: None,
             errored: None,
             done: false,
+            progress: 0,
+        }
+    }
+
+    pub fn get_progress(&self) -> u8 {
+        self.progress
+    }
+
+    // returns a tuple where 0 is the current stage number
+    // and 1 is the max number of stages. note: these are not indicies.
+    // so if your progress item has one stage, then this will return (1, 1)
+    // so that means it will return (1, 1) while it is doing the first(and only) stage
+    // and also when it is done with that stage, it will still return (1, 1). If you
+    // want to know if this progress item is done or not, use is_done() instead.
+    // if there is an error, or if the progress hasnt started yet, returns (0, 0)
+    pub fn get_stage_progress(&self) -> (usize, usize) {
+        if !self.started { return (0, 0); }
+        match self.current_stage {
+            None => (0, 0),
+            Some(ref tuple) => (tuple.0, self.numstages),
+        }
+    }
+
+    pub fn get_stage_name(&self) -> String {
+        match self.current_stage {
+            None => "".into(),
+            Some(ref tuple) => {
+                match &tuple.1.name {
+                    // return the actual name if we have it
+                    Some(name) => format!("{:?}", name),
+                    // otherwise a number of the stage index
+                    None => format!("{:?}", tuple.0),
+                }
+            }
         }
     }
 
@@ -134,13 +157,14 @@ impl<S: Debug + Send> ProgressItem<S> {
             self.done = true;
             return;
         }
-
         if let Some(stage) = self.stages.pop_front() {
             if let Some(task) = stage.task {
+                println!("a2");
                 self.current_stage = Some((stage_index, Stage {
                     name: stage.name,
                     task: None,
                 }));
+                self.progress = 0;
                 tokio::spawn(async move {
                     let task_result = task.await;
                     match task_result {
@@ -216,10 +240,65 @@ mod tests {
     use tokio::runtime::Runtime;
 
     async fn download_something(secs: u64) -> TaskResult {
-        let duration = std::time::Duration::from_secs(secs);
-        Delay::new(duration).await;
-
+        delay_millis(secs * 1000).await;
         Ok(())
+    }
+
+    async fn delay_millis(millis: u64) {
+        let duration = std::time::Duration::from_millis(millis);
+        Delay::new(duration).await;
+    }
+
+    fn make_simple_progress_item(wait1: u64, wait2: u64, wait3: u64) -> ProgressItem<&'static str> {
+        let future1 = download_something(wait1);
+        let future2 = download_something(wait2);
+        let future3 = download_something(wait3);
+        let mystage1 = Stage::make("wait1", future1);
+        let mystage2 = Stage::make("wait2", future2);
+        let mystage3 = Stage::make("wait3", future3);
+        let mut prog = ProgressItem::new("simple");
+        prog.register_stage(mystage1);
+        prog.register_stage(mystage2);
+        prog.register_stage(mystage3);
+        prog
+    }
+
+    pub fn get_progress_stage_name(key: &String, progholder: &'static Mutex<ProgressHolder<String, &'static str>>) -> String {
+        match progholder.lock() {
+            Err(_) => "ooops".into(),
+            Ok(mut guard) => match guard.progresses.get_mut(key) {
+                None => "oops".into(),
+                Some(progitem) => progitem.get_stage_name(),
+            },
+        }
+    }
+
+    #[test]
+    fn get_stage_name_works() {
+        let mut myprog = make_simple_progress_item(1, 1, 1);
+        lazy_static! {
+            static ref PROGHOLDER: Mutex<ProgressHolder<String, &'static str>> = Mutex::new(
+                ProgressHolder::<String, &'static str>::default()
+            );
+        }
+
+        let key: String = "reee".into();
+        let mut rt = Runtime::new().unwrap();
+        rt.block_on(async move {
+            match PROGHOLDER.lock() {
+                Err(_) => {},
+                Ok(mut guard) => {
+                    myprog.start(key.clone(), &PROGHOLDER);
+                    guard.progresses.insert(key.clone(), myprog);
+                },
+            }
+
+            assert!(get_progress_stage_name(&key, &PROGHOLDER).contains("wait1"));
+            delay_millis(1100).await;
+            assert!(get_progress_stage_name(&key, &PROGHOLDER).contains("wait2"));
+            delay_millis(1100).await;
+            assert!(get_progress_stage_name(&key, &PROGHOLDER).contains("wait3"));
+        });
     }
 
     #[test]
