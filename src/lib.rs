@@ -159,7 +159,6 @@ impl<S: Debug + Send> ProgressItem<S> {
         }
         if let Some(stage) = self.stages.pop_front() {
             if let Some(task) = stage.task {
-                println!("a2");
                 self.current_stage = Some((stage_index, Stage {
                     name: stage.name,
                     task: None,
@@ -263,6 +262,24 @@ mod tests {
         prog
     }
 
+    macro_rules! run_in_tokio_with_static_progholder {
+        ($($something:expr;)+) => {
+            {
+                lazy_static! {
+                    static ref PROGHOLDER: Mutex<ProgressHolder<String, &'static str>> = Mutex::new(
+                        ProgressHolder::<String, &'static str>::default()
+                    );
+                }
+                let mut rt = Runtime::new().unwrap();
+                rt.block_on(async move {
+                    $(
+                        $something;
+                    )*
+                });
+            }
+        };
+    }
+
     pub fn get_progress_stage_name(key: &String, progholder: &'static Mutex<ProgressHolder<String, &'static str>>) -> String {
         match progholder.lock() {
             Err(_) => "ooops".into(),
@@ -275,16 +292,9 @@ mod tests {
 
     #[test]
     fn get_stage_name_works() {
-        let mut myprog = make_simple_progress_item(1, 1, 1);
-        lazy_static! {
-            static ref PROGHOLDER: Mutex<ProgressHolder<String, &'static str>> = Mutex::new(
-                ProgressHolder::<String, &'static str>::default()
-            );
-        }
-
-        let key: String = "reee".into();
-        let mut rt = Runtime::new().unwrap();
-        rt.block_on(async move {
+        run_in_tokio_with_static_progholder! {{
+            let mut myprog = make_simple_progress_item(1, 1, 1);
+            let key: String = "reee".into();
             match PROGHOLDER.lock() {
                 Err(_) => {},
                 Ok(mut guard) => {
@@ -298,26 +308,18 @@ mod tests {
             assert!(get_progress_stage_name(&key, &PROGHOLDER).contains("wait2"));
             delay_millis(1100).await;
             assert!(get_progress_stage_name(&key, &PROGHOLDER).contains("wait3"));
-        });
+        };};
     }
 
     #[test]
     fn can_call_start() {
-        let future = download_something(3);
-        let mystage = Stage::make("download_something", future);
-        let mut myprogitem = ProgressItem::new("ayyy");
-        myprogitem.register_stage(mystage);
-
-        lazy_static! {
-            static ref PROGHOLDER: Mutex<ProgressHolder<String, &'static str>> = Mutex::new(
-                ProgressHolder::<String, &'static str>::default()
-            );
-        }
-
-        let mut rt = Runtime::new().unwrap();
-        rt.block_on(async move {
+        run_in_tokio_with_static_progholder! {{
+            let future = download_something(3);
+            let mystage = Stage::make("download_something", future);
+            let mut myprogitem = ProgressItem::new("ayyy");
+            myprogitem.register_stage(mystage);
             myprogitem.start(String::from("reeeee"), &PROGHOLDER);
-        });
+        };};
     }
 
     #[test]
