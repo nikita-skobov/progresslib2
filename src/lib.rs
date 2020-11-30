@@ -8,7 +8,8 @@ use futures::task;
 use std::task::{Context, Poll};
 
 
-type PinBoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type TaskResult = Result<(), String>;
+type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 
 pub struct Stage<S: Debug> {
     name: S,
@@ -22,7 +23,8 @@ impl<S: Debug> Stage<S> {
             task: None,
         }
     }
-    pub fn set_task_from_future<F: Future<Output = ()> + Send + 'static>(
+
+    pub fn set_task_from_future<F: Future<Output = TaskResult> + Send + 'static>(
         mut self,
         future: F
     ) -> Self {
@@ -30,11 +32,32 @@ impl<S: Debug> Stage<S> {
         self
     }
 
-    pub fn make<F: Future<Output = ()> + Send + 'static>(
+    pub fn set_task_from_simple_future<F: Future<Output = ()> + Send + 'static>(
+        mut self,
+        future: F
+    ) -> Self {
+        self.task = Some(Box::pin(async move {
+            future.await;
+            Ok(())
+        }));
+        self
+    }
+
+    pub fn make<F: Future<Output = TaskResult> + Send + 'static>(
         name: S,
         future: F,
     ) -> Self {
         Stage::new(name).set_task_from_future(future)
+    }
+
+    pub fn make_simple<F: Future<Output = ()> + Send + 'static>(
+        name: S,
+        future: F,
+    ) -> Self {
+        Stage::new(name).set_task_from_future(async move {
+            future.await;
+            Ok(())
+        })
     }
 }
 
@@ -78,9 +101,11 @@ mod tests {
     use super::*;
     use futures_timer::Delay;
 
-    async fn download_something(secs: u64) {
+    async fn download_something(secs: u64) -> TaskResult {
         let duration = std::time::Duration::from_secs(secs);
         Delay::new(duration).await;
+
+        Ok(())
     }
 
     #[test]
@@ -110,7 +135,7 @@ mod tests {
         let done = async { };
         let mystage3 = Stage::make(ThisEnum::Download3, future3);
         let mystage6 = Stage::make(ThisEnum::Download6, future6);
-        let mystagedone = Stage::make(ThisEnum::DownloadDone, done);
+        let mystagedone = Stage::make_simple(ThisEnum::DownloadDone, done);
 
         // note the name of the progress item is a string
         // even though the name of the tasks are enums. this is ok
