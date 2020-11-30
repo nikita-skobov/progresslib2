@@ -66,8 +66,8 @@ impl<S: Debug> Debug for Stage<S> {
         f.debug_struct("Stage")
             .field("name", &self.name)
             .field("future", match &self.task {
-                Some(_) => &"Some future",
-                None => &"None",
+                Some(_) => &"set",
+                None => &"not set",
             })
             .finish()
     }
