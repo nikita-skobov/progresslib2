@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::pin::Pin;
 use futures::task;
+use futures_timer::Delay;
+use std::time::Duration;
 use std::task::{Context, Poll};
 
 
@@ -83,6 +85,8 @@ pub struct ProgressItem<S: Debug> {
     progress: u32, // 0 - 100,000 (each 1,000 is 1%)
     errored: Option<ProgressError>,
     done: bool,
+    max_lock_attempts: usize,
+    lock_attempt_wait: u64,
 }
 
 
@@ -97,7 +101,23 @@ impl<S: Debug + Send> ProgressItem<S> {
             errored: None,
             done: false,
             progress: 0,
+            max_lock_attempts: 3,
+            lock_attempt_wait: 1000,
         }
+    }
+
+    /// the default max_lock_attempts is 3. you can provide an alternate max_lock_attempts
+    /// setting 0 means infinite, not 0 attempts. if it was 0 attempts, nothing would get done
+    pub fn set_max_lock_attempts(mut self, max: usize) -> Self {
+        self.max_lock_attempts = max;
+        self
+    }
+
+    /// duration in milliseconds. by default, we wait 1000 milliseconds
+    /// before consecutive lock attempts, but you can customize this.
+    pub fn set_lock_attempt_duration(mut self, duration: u64) -> Self {
+        self.lock_attempt_wait = duration;
+        self
     }
 
     pub fn get_progress_error(&self) -> &Option<ProgressError> {
@@ -186,6 +206,9 @@ impl<S: Debug + Send> ProgressItem<S> {
             self.done = true;
             return;
         }
+        let max_lock_attempts = self.max_lock_attempts;
+        let lock_attempt_wait = self.lock_attempt_wait;
+
         if let Some(stage) = self.stages.pop_front() {
             if let Some(task) = stage.task {
                 self.current_stage = Some((stage_index, Stage {
@@ -193,73 +216,102 @@ impl<S: Debug + Send> ProgressItem<S> {
                     task: None,
                 }));
                 self.progress = 0;
+
                 tokio::spawn(async move {
                     let task_result = task.await;
-                    match task_result {
-                        Ok(_) => Self::handle_ok(key, holder, stage_index),
-                        Err(s) => Self::handle_error(key, holder, stage_index, s),
+                    let is_error = match task_result {
+                        Ok(_) => None,
+                        Err(s) => Some(s),
                     };
+                    Self::handle_end_of_stage(
+                        key,
+                        holder,
+                        stage_index,
+                        is_error,
+                        max_lock_attempts,
+                        lock_attempt_wait
+                    );
                 });
-
                 // this is the desirable path, return here
                 return;
             }
         }
+
         // if we failed to get a stage, or we failed to get a task
         // from that stage, then we will consider that an error
+        Self::handle_end_of_stage(
+            key,
+            holder,
+            stage_index,
+            Some("Failed to run stage".into()),
+            max_lock_attempts,
+            lock_attempt_wait,
+        );
+    }
+
+    pub fn handle_end_of_stage<K: Eq + Hash + Debug + Send>(
+        key: K,
+        holder: &'static Mutex<ProgressHolder<K, S>>,
+        stage_index: usize,
+        is_error: Option<String>,
+        max_lock_attempts: usize,
+        lock_attempt_wait: u64,
+    ) {
         tokio::spawn(async move {
-            // TODO: add delay?
-            Self::handle_error(key, holder, stage_index, "Failed to run stage".into());
-        });
-    }
+            // delay first because otherwise doesnt seem we can build the await
+            // state machine :(
+            tokio::time::delay_for(Duration::from_millis(lock_attempt_wait)).await;
+            // then we try to get a lock
+            let mut guard = match holder.try_lock() {
+                Err(_) => {
+                    // if we fail to get a lock, try again by calling this recursively
+                    let new_lock_attempts = if max_lock_attempts == 0 {
+                        max_lock_attempts
+                    } else if max_lock_attempts - 1 == 0 {
+                        // if it would reduce to 0, then stop here otherwise wed
+                        // have infinite loop on account of the above condition
+                        return;
+                    } else {
+                        max_lock_attempts - 1
+                    };
 
-
-    // TODO: for both handle methods, should use try_lock otherwise
-    // it will block, which is especially bad if something else
-    // is locking the progress holder waiting for these functions...
-
-
-    pub fn handle_ok<K: Eq + Hash + Debug + Send>(
-        key: K,
-        holder: &'static Mutex<ProgressHolder<K, S>>,
-        stage_index: usize,
-    ) {
-        match holder.lock() {
-            Err(_) => {}
-            Ok(mut guard) => match guard.progresses.get_mut(&key) {
-                None => {}
-                Some(me) => {
-                    me.do_stage(key, holder, stage_index + 1);
+                    Self::handle_end_of_stage(
+                        key,
+                        holder,
+                        stage_index,
+                        is_error,
+                        new_lock_attempts,
+                        lock_attempt_wait,
+                    );
+                    return;
                 }
-            }
-        }
-    }
+                Ok(guard) => guard,
+            };
 
-    pub fn handle_error<K: Eq + Hash + Debug>(
-        key: K,
-        holder: &'static Mutex<ProgressHolder<K, S>>,
-        stage_index: usize,
-        error_string: String,
-    ) {
-        match holder.lock() {
-            Err(_) => {}
-            Ok(mut guard) => match guard.progresses.get_mut(&key) {
-                None => {}
-                Some(mut me) => {
-                    me.errored = Some(ProgressError {
-                        error_string,
-                        progress_index: stage_index,
-                        name: match me.current_stage {
-                            None => None,
-                            Some(ref tuple) => match tuple.1.name {
+            // if we got the lock, handle it: if is_error, then set self.errored
+            // otherwise process the next stage
+            match guard.progresses.get_mut(&key) {
+                None => {}, // nothing we can do :shrug:
+                Some(me) => match is_error {
+                    None => {
+                        me.do_stage(key, holder, stage_index + 1);
+                    },
+                    Some(error_string) => {
+                        me.errored = Some(ProgressError {
+                            error_string,
+                            progress_index: stage_index,
+                            name: match me.current_stage {
                                 None => None,
-                                Some(ref name) => Some(format!("{:?}", name)),
+                                Some(ref tuple) => match tuple.1.name {
+                                    None => None,
+                                    Some(ref name) => Some(format!("{:?}", name)),
+                                }
                             }
-                        }
-                    });
+                        });
+                    },
                 }
             }
-        }
+        });
     }
 }
 
@@ -341,7 +393,8 @@ mod tests {
     #[test]
     fn should_error_if_cant_get_stage() {
         run_in_tokio_with_static_progholder! {{
-            let mut myprog = ProgressItem::<&'static str>::new("hello");
+            let myprog = ProgressItem::<&'static str>::new("hello");
+            let mut myprog = myprog.set_lock_attempt_duration(0);
             let mystage = Stage::new("a");
             myprog.register_stage(mystage);
             assert!(!myprog.is_done());
@@ -370,7 +423,8 @@ mod tests {
     #[test]
     fn get_stage_name_works() {
         run_in_tokio_with_static_progholder! {{
-            let mut myprog = make_simple_progress_item(1, 1, 1);
+            let myprog = make_simple_progress_item(1, 1, 1);
+            let mut myprog = myprog.set_lock_attempt_duration(0);
             let key: String = "reee".into();
             match PROGHOLDER.lock() {
                 Err(_) => {},
