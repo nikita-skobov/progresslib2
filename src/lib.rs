@@ -391,22 +391,19 @@ mod tests {
     }
 
     #[test]
-    fn should_error_if_cant_get_stage() {
+    fn should_error_if_cant_get_task_in_stage() {
         run_in_tokio_with_static_progholder! {{
             let myprog = ProgressItem::<&'static str>::new("hello");
             let mut myprog = myprog.set_lock_attempt_duration(0);
-            let mystage = Stage::new("a");
+            let mystage = Stage::new("a"); // no task here. should error
             myprog.register_stage(mystage);
             assert!(!myprog.is_done());
 
             let key = String::from("reee");
-            match PROGHOLDER.lock() {
-                Err(_) => {},
-                Ok(mut guard) => {
-                    myprog.start(key.clone(), &PROGHOLDER);
-                    guard.progresses.insert(key.clone(), myprog);
-                },
-            }
+            let mut guard = PROGHOLDER.lock().unwrap();
+            myprog.start(key.clone(), &PROGHOLDER);
+            guard.progresses.insert(key.clone(), myprog);
+            drop(guard);
 
             delay_millis(10).await;
             let mut guard = PROGHOLDER.lock().unwrap();
