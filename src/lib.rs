@@ -76,8 +76,7 @@ pub struct ProgressError {
 }
 
 #[derive(Default)]
-pub struct ProgressItem<S: Debug> {
-    name: S,
+pub struct ProgressItem {
     stages: VecDeque<Stage>,
     started: bool,
     numstages: usize,
@@ -90,10 +89,9 @@ pub struct ProgressItem<S: Debug> {
 }
 
 
-impl<S: Debug + Send> ProgressItem<S> {
-    pub fn new(name: S) -> Self {
+impl ProgressItem {
+    pub fn new<S: AsRef<str>>(name: S) -> Self {
         ProgressItem {
-            name,
             numstages: 0,
             stages: VecDeque::new(),
             started: false,
@@ -188,7 +186,7 @@ impl<S: Debug + Send> ProgressItem<S> {
     pub fn start<K: Eq + Hash + Debug + Send>(
         &mut self,
         key: K,
-        holder: &'static Mutex<ProgressHolder<K, S>>,
+        holder: &'static Mutex<ProgressHolder<K>>,
     ) {
         if self.started { return; }
         self.started = true;
@@ -199,7 +197,7 @@ impl<S: Debug + Send> ProgressItem<S> {
     pub fn do_stage<K: Eq + Hash + Debug + Send + 'static>(
         &mut self,
         key: K,
-        holder: &'static Mutex<ProgressHolder<K, S>>,
+        holder: &'static Mutex<ProgressHolder<K>>,
         stage_index: usize,
     ) {
         if stage_index >= self.numstages {
@@ -251,7 +249,7 @@ impl<S: Debug + Send> ProgressItem<S> {
 
     pub fn handle_end_of_stage<K: Eq + Hash + Debug + Send>(
         key: K,
-        holder: &'static Mutex<ProgressHolder<K, S>>,
+        holder: &'static Mutex<ProgressHolder<K>>,
         stage_index: usize,
         is_error: Option<String>,
         max_lock_attempts: usize,
@@ -316,8 +314,8 @@ impl<S: Debug + Send> ProgressItem<S> {
 }
 
 #[derive(Default)]
-pub struct ProgressHolder<K: Eq + Hash + Debug, S: Debug> {
-    pub progresses: HashMap<K, ProgressItem<S>>,
+pub struct ProgressHolder<K: Eq + Hash + Debug> {
+    pub progresses: HashMap<K, ProgressItem>,
 }
 
 #[cfg(test)]
@@ -338,7 +336,7 @@ mod tests {
         Delay::new(duration).await;
     }
 
-    fn make_simple_progress_item(wait1: u64, wait2: u64, wait3: u64) -> ProgressItem<&'static str> {
+    fn make_simple_progress_item(wait1: u64, wait2: u64, wait3: u64) -> ProgressItem {
         let future1 = download_something(wait1);
         let future2 = download_something(wait2);
         let future3 = download_something(wait3);
@@ -352,12 +350,46 @@ mod tests {
         prog
     }
 
+    // these ones will be in millis
+    async fn make_advanced_stage<K: Eq + Hash + Debug + Send>(
+        wait: u64,
+        key: K,
+        progholder: &'static Mutex<ProgressHolder<K>>
+    ) {
+        for i in 1..4 {
+            let duration = std::time::Duration::from_millis(wait);
+            Delay::new(duration).await;
+            match progholder.lock() {
+                Err(_) => {},
+                Ok(mut guard) => match guard.progresses.get_mut(&key) {
+                    None => {}
+                    Some(progitem) => {
+                        progitem.set_progress(i * 25_000);
+                    }
+                }
+            }
+        }
+    }
+
+    fn make_advanced_progress_item<K: Eq + Hash + Debug + Send + Clone>(
+        wait: u64,
+        key: K,
+        progholder: &'static Mutex<ProgressHolder<K>>,
+    ) -> ProgressItem {
+        let stage1 = Stage::make_simple("wait1", make_advanced_stage(wait, key.clone(), progholder));
+        let stage2 = Stage::make_simple("wait2", make_advanced_stage(wait, key.clone(), progholder));
+        let mut prog = ProgressItem::new("advanced");
+        prog.register_stage(stage1);
+        prog.register_stage(stage2);
+        prog
+    }
+
     macro_rules! run_in_tokio_with_static_progholder {
         ($($something:expr;)+) => {
             {
                 lazy_static! {
-                    static ref PROGHOLDER: Mutex<ProgressHolder<String, &'static str>> = Mutex::new(
-                        ProgressHolder::<String, &'static str>::default()
+                    static ref PROGHOLDER: Mutex<ProgressHolder<String>> = Mutex::new(
+                        ProgressHolder::<String>::default()
                     );
                 }
                 let mut rt = Runtime::new().unwrap();
@@ -370,7 +402,7 @@ mod tests {
         };
     }
 
-    pub fn get_progress_stage_name(key: &String, progholder: &'static Mutex<ProgressHolder<String, &'static str>>) -> String {
+    pub fn get_progress_stage_name(key: &String, progholder: &'static Mutex<ProgressHolder<String>>) -> String {
         match progholder.lock() {
             Err(_) => "ooops".into(),
             Ok(mut guard) => match guard.progresses.get_mut(key) {
@@ -380,10 +412,54 @@ mod tests {
         }
     }
 
+    pub fn get_progress_percent(key: &String, progholder: &'static Mutex<ProgressHolder<String>>) -> Option<u32> {
+        let mut guard = progholder.lock().unwrap();
+        match guard.progresses.get_mut(key) {
+            None => None,
+            Some(ref progitem) => {
+                Some(progitem.get_progress())
+            }
+        }
+    }
+
+    #[test]
+    fn can_update_progress_value() {
+        run_in_tokio_with_static_progholder! {{
+            let key = String::from("key");
+            let myprog = make_advanced_progress_item(250, key.clone(), &PROGHOLDER);
+            let mut myprog = myprog.set_lock_attempt_duration(0);
+            let mut guard = PROGHOLDER.lock().unwrap();
+            myprog.start(key.clone(), &PROGHOLDER);
+            guard.progresses.insert(key.clone(), myprog);
+            drop(guard);
+
+            // we should start at 0%
+            delay_millis(10).await;
+            let progress = get_progress_percent(&key, &PROGHOLDER).unwrap();
+            assert_eq!(progress, 0);
+
+            // after a half seconds it should be more than 0
+            // but we should still be in stage 1
+            delay_millis(500).await;
+            let progress = get_progress_percent(&key, &PROGHOLDER).unwrap();
+            let progress_name = get_progress_stage_name(&key, &PROGHOLDER);
+            assert!(progress > 0);
+            assert!(progress_name.contains("wait1"));
+
+            // after another half second, we should be again greater than 0
+            // but in the next stage
+            delay_millis(600).await;
+            let progress = get_progress_percent(&key, &PROGHOLDER).unwrap();
+            let progress_name = get_progress_stage_name(&key, &PROGHOLDER);
+            assert!(progress > 0);
+            assert!(progress_name.contains("wait2"));
+        };};
+    }
+
     #[test]
     fn should_auto_done_if_no_stages_provided() {
         run_in_tokio_with_static_progholder! {{
-            let mut myprog = ProgressItem::<&'static str>::new("hello");
+            let mut myprog = ProgressItem::new("hello");
             assert!(!myprog.is_done());
             myprog.start("a".into(), &PROGHOLDER);
             assert!(myprog.is_done());
@@ -393,7 +469,7 @@ mod tests {
     #[test]
     fn should_error_if_cant_get_task_in_stage() {
         run_in_tokio_with_static_progholder! {{
-            let myprog = ProgressItem::<&'static str>::new("hello");
+            let myprog = ProgressItem::new("hello");
             let mut myprog = myprog.set_lock_attempt_duration(0);
             let mystage = Stage::new("a"); // no task here. should error
             myprog.register_stage(mystage);
