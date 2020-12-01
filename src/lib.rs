@@ -12,7 +12,7 @@ use std::time::Duration;
 use std::task::{Context, Poll};
 
 
-type TaskResult = Result<(), String>;
+pub type TaskResult = Result<(), String>;
 type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 
 pub struct Stage {
@@ -90,6 +90,7 @@ pub struct ProgressItem {
 
 
 impl ProgressItem {
+    // TODO: decide what to do with name... should it be part of progress item or not?
     pub fn new<S: AsRef<str>>(name: S) -> Self {
         ProgressItem {
             numstages: 0,
