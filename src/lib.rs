@@ -132,7 +132,7 @@ impl ProgressItem {
         } else {
             // this is safe to do because we checked if its over 100,000 which if its not
             // then it will definitely fit into u32
-            self.progress = overflow_check as u32;
+            self.progress = new_progress;
         }
     }
 
