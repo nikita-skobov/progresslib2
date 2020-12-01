@@ -68,9 +68,9 @@ pub const TICKS_PER_PERCENT: u32 = MAX_PROGRESS_TICKS / 100;
 
 #[derive(Debug)]
 pub struct ProgressError {
-    name: Option<String>,
-    progress_index: usize,
-    error_string: String,
+    pub name: Option<String>,
+    pub progress_index: usize,
+    pub error_string: String,
 }
 
 #[derive(Default)]
@@ -98,6 +98,10 @@ impl<S: Debug + Send> ProgressItem<S> {
             done: false,
             progress: 0,
         }
+    }
+
+    pub fn get_progress_error(&self) -> &Option<ProgressError> {
+        &self.errored
     }
 
     /// set the progress level. new_progress must be in 'ticks'
@@ -203,8 +207,17 @@ impl<S: Debug + Send> ProgressItem<S> {
         }
         // if we failed to get a stage, or we failed to get a task
         // from that stage, then we will consider that an error
-        Self::handle_error(key, holder, stage_index, "Failed to run stage".into());
+        tokio::spawn(async move {
+            // TODO: add delay?
+            Self::handle_error(key, holder, stage_index, "Failed to run stage".into());
+        });
     }
+
+
+    // TODO: for both handle methods, should use try_lock otherwise
+    // it will block, which is especially bad if something else
+    // is locking the progress holder waiting for these functions...
+
 
     pub fn handle_ok<K: Eq + Hash + Debug + Send>(
         key: K,
@@ -313,6 +326,45 @@ mod tests {
                 Some(progitem) => progitem.get_stage_name(),
             },
         }
+    }
+
+    #[test]
+    fn should_auto_done_if_no_stages_provided() {
+        run_in_tokio_with_static_progholder! {{
+            let mut myprog = ProgressItem::<&'static str>::new("hello");
+            assert!(!myprog.is_done());
+            myprog.start("a".into(), &PROGHOLDER);
+            assert!(myprog.is_done());
+        };};
+    }
+
+    #[test]
+    fn should_error_if_cant_get_stage() {
+        run_in_tokio_with_static_progholder! {{
+            let mut myprog = ProgressItem::<&'static str>::new("hello");
+            let mystage = Stage::new("a");
+            myprog.register_stage(mystage);
+            assert!(!myprog.is_done());
+
+            let key = String::from("reee");
+            match PROGHOLDER.lock() {
+                Err(_) => {},
+                Ok(mut guard) => {
+                    myprog.start(key.clone(), &PROGHOLDER);
+                    guard.progresses.insert(key.clone(), myprog);
+                },
+            }
+
+            delay_millis(10).await;
+            let mut guard = PROGHOLDER.lock().unwrap();
+            match guard.progresses.get_mut(&key) {
+                None => assert!(false),
+                Some(ref progitem) => match progitem.get_progress_error() {
+                    None => assert!(false),
+                    Some(err) => assert!(err.error_string.contains("Failed to run stage")),
+                }
+            }
+        };};
     }
 
     #[test]
