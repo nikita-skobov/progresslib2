@@ -63,6 +63,9 @@ impl Stage {
     }
 }
 
+pub const MAX_PROGRESS_TICKS: u32 = 100_000;
+pub const TICKS_PER_PERCENT: u32 = MAX_PROGRESS_TICKS / 100;
+
 #[derive(Debug)]
 pub struct ProgressError {
     name: Option<String>,
@@ -77,7 +80,7 @@ pub struct ProgressItem<S: Debug> {
     started: bool,
     numstages: usize,
     current_stage: Option<(usize, Stage)>,
-    progress: u8,
+    progress: u32, // 0 - 100,000 (each 1,000 is 1%)
     errored: Option<ProgressError>,
     done: bool,
 }
@@ -97,17 +100,39 @@ impl<S: Debug + Send> ProgressItem<S> {
         }
     }
 
-    pub fn get_progress(&self) -> u8 {
-        self.progress
+    /// set the progress level. new_progress must be in 'ticks'
+    /// where 1000 ticks represents 1%
+    pub fn set_progress(&mut self, new_progress: u32) {
+        let overflow_check: u64 = self.progress as u64 + new_progress as u64;
+        if overflow_check > MAX_PROGRESS_TICKS as u64 {
+            self.progress = MAX_PROGRESS_TICKS;
+        } else {
+            // this is safe to do because we checked if its over 100,000 which if its not
+            // then it will definitely fit into u32
+            self.progress = overflow_check as u32;
+        }
     }
 
-    // returns a tuple where 0 is the current stage number
-    // and 1 is the max number of stages. note: these are not indicies.
-    // so if your progress item has one stage, then this will return (1, 1)
-    // so that means it will return (1, 1) while it is doing the first(and only) stage
-    // and also when it is done with that stage, it will still return (1, 1). If you
-    // want to know if this progress item is done or not, use is_done() instead.
-    // if there is an error, or if the progress hasnt started yet, returns (0, 0)
+    /// like set_progress but only allows progress to increase
+    pub fn inc_progress(&mut self, new_progress: u32) {
+        if new_progress < self.progress {
+            self.set_progress(new_progress);
+        }
+    }
+
+    pub fn get_progress(&self) -> u32 { self.progress }
+
+    pub fn has_started(&self) -> bool { self.started }
+
+    pub fn is_done(&self) -> bool { self.done }
+
+    /// returns a tuple where 0 is the current stage number
+    /// and 1 is the max number of stages. note: these are not indicies.
+    /// so if your progress item has one stage, then this will return (1, 1)
+    /// so that means it will return (1, 1) while it is doing the first(and only) stage
+    /// and also when it is done with that stage, it will still return (1, 1). If you
+    /// want to know if this progress item is done or not, use is_done() instead.
+    /// if there is an error, or if the progress hasnt started yet, returns (0, 0)
     pub fn get_stage_progress(&self) -> (usize, usize) {
         if !self.started { return (0, 0); }
         match self.current_stage {
@@ -178,7 +203,7 @@ impl<S: Debug + Send> ProgressItem<S> {
         }
         // if we failed to get a stage, or we failed to get a task
         // from that stage, then we will consider that an error
-        // TODO: self.errored
+        Self::handle_error(key, holder, stage_index, "Failed to run stage".into());
     }
 
     pub fn handle_ok<K: Eq + Hash + Debug + Send>(
