@@ -138,7 +138,7 @@ impl ProgressItem {
 
     /// like set_progress but only allows progress to increase
     pub fn inc_progress(&mut self, new_progress: u32) {
-        if new_progress < self.progress {
+        if new_progress > self.progress {
             self.set_progress(new_progress);
         }
     }
@@ -421,6 +421,25 @@ mod tests {
                 Some(progitem.get_progress())
             }
         }
+    }
+
+    #[test]
+    fn inc_progress_works_percent() {
+        let mut myprog = ProgressItem::new("");
+        myprog.set_progress(TICKS_PER_PERCENT * 3);
+        assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT * 3);
+        myprog.inc_progress(TICKS_PER_PERCENT * 10);
+        assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT * 10);
+        myprog.inc_progress(TICKS_PER_PERCENT * 3);
+        // it should still be 10%, cant go down with inc_progress
+        assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT * 10);
+    }
+
+    #[test]
+    fn set_progress_works() {
+        let mut myprog = ProgressItem::new("");
+        myprog.set_progress(TICKS_PER_PERCENT);
+        assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT);
     }
 
     #[test]
