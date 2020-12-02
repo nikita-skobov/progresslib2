@@ -126,8 +126,7 @@ impl ProgressItem {
     /// set the progress level. new_progress must be in 'ticks'
     /// where 1000 ticks represents 1%
     pub fn set_progress(&mut self, new_progress: u32) {
-        let overflow_check: u64 = self.progress as u64 + new_progress as u64;
-        if overflow_check > MAX_PROGRESS_TICKS as u64 {
+        if new_progress > MAX_PROGRESS_TICKS as u32 {
             self.progress = MAX_PROGRESS_TICKS;
         } else {
             // this is safe to do because we checked if its over 100,000 which if its not
@@ -136,11 +135,40 @@ impl ProgressItem {
         }
     }
 
+    /// prog_percent is a float64 from 0.0-100.0 inclusively
+    pub fn set_progress_percent(&mut self, prog_percent: f64) {
+        if prog_percent < 0 as f64 {
+            return;
+        }
+
+        let new_ticks = prog_percent * TICKS_PER_PERCENT as f64;
+        self.set_progress(new_ticks as u32);
+    }
+
+    /// prog_norm is a float64 from 0.0-1.0 inclusively where 0.0
+    /// represents 0%, and 1.0 represents 100%
+    pub fn set_progress_percent_normalized(&mut self, prog_norm: f64) {
+        self.set_progress_percent(prog_norm * 100.0);
+    }
+
     /// like set_progress but only allows progress to increase
     pub fn inc_progress(&mut self, new_progress: u32) {
         if new_progress > self.progress {
             self.set_progress(new_progress);
         }
+    }
+
+    /// returns a value between 0 and 1 (inclusive) of the percentage
+    /// normalized. ie: 1 <-> 100%, 0 <-> 0%
+    pub fn get_progress_percent_normalized(&self) -> f64 {
+        let percent_norm = self.progress as f64 / MAX_PROGRESS_TICKS as f64;
+        percent_norm
+    }
+
+    /// returns a value between 0.0 and 100.0 of the percentage
+    pub fn get_progress_percent(&self) -> f64 {
+        let percent_norm = self.get_progress_percent_normalized();
+        percent_norm * 100.0
     }
 
     pub fn get_progress(&self) -> u32 { self.progress }
@@ -421,6 +449,29 @@ mod tests {
                 Some(progitem.get_progress())
             }
         }
+    }
+
+    #[test]
+    fn get_and_set_progress_percent_normalized_works() {
+        let mut myprog = ProgressItem::new("");
+        myprog.set_progress_percent_normalized(0.5);
+        assert_eq!(myprog.get_progress_percent_normalized(), 0.5);
+
+        myprog.set_progress_percent_normalized(0.9999);
+        assert_eq!(myprog.get_progress_percent_normalized(), 0.9999);
+    }
+
+    #[test]
+    fn set_progress_percent_works() {
+        let mut myprog = ProgressItem::new("");
+        myprog.set_progress_percent(0.0);
+        assert_eq!(myprog.get_progress(), 0);
+        myprog.set_progress_percent(22.5);
+        let expected_ticks = 22.5 * TICKS_PER_PERCENT as f64;
+        let expected_ticks = expected_ticks as u32;
+        assert_eq!(myprog.get_progress(), expected_ticks);
+        myprog.set_progress_percent(99.9999999);
+        assert_ne!(myprog.get_progress(), MAX_PROGRESS_TICKS);
     }
 
     #[test]
