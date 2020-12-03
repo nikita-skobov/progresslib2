@@ -162,6 +162,21 @@ impl ProgressItem {
         }
     }
 
+    /// like set_progress_percent but only allows increasing the progress
+    pub fn inc_progress_percent(&mut self, new_progress: f64) {
+        if new_progress < 0 as f64 {
+            return;
+        }
+
+        let new_ticks = new_progress * TICKS_PER_PERCENT as f64;
+        self.inc_progress(new_ticks as u32);
+    }
+
+    /// like set_progress_percent_normalized but only allows increasing
+    pub fn inc_progress_percent_normalized(&mut self, prog_norm: f64) {
+        self.inc_progress_percent(prog_norm * 100.0);
+    }
+
     /// returns a value between 0 and 1 (inclusive) of the percentage
     /// normalized. ie: 1 <-> 100%, 0 <-> 0%
     pub fn get_progress_percent_normalized(&self) -> f64 {
@@ -473,6 +488,17 @@ mod tests {
                 Some(progitem.get_progress())
             }
         }
+    }
+
+    #[test]
+    fn inc_progress_percent_works() {
+        let mut myprog = ProgressItem::new();
+        myprog.inc_progress_percent(2.0);
+        assert_eq!(myprog.get_progress_percent(), 2.0);
+
+        // it shouldnt allow it to go down
+        myprog.inc_progress_percent(1.0);
+        assert_eq!(myprog.get_progress_percent(), 2.0);
     }
 
     #[test]
