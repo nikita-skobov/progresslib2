@@ -75,7 +75,6 @@ pub struct ProgressError {
     pub error_string: String,
 }
 
-#[derive(Default)]
 pub struct ProgressItem {
     stages: VecDeque<Stage>,
     started: bool,
@@ -88,10 +87,8 @@ pub struct ProgressItem {
     lock_attempt_wait: u64,
 }
 
-
-impl ProgressItem {
-    // TODO: decide what to do with name... should it be part of progress item or not?
-    pub fn new() -> Self {
+impl Default for ProgressItem {
+    fn default() -> Self {
         ProgressItem {
             numstages: 0,
             stages: VecDeque::new(),
@@ -103,6 +100,13 @@ impl ProgressItem {
             max_lock_attempts: 3,
             lock_attempt_wait: 1000,
         }
+    }
+}
+
+impl ProgressItem {
+    // TODO: decide what to do with name... should it be part of progress item or not?
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// the default max_lock_attempts is 3. you can provide an alternate max_lock_attempts
