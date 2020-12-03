@@ -91,7 +91,7 @@ pub struct ProgressItem {
 
 impl ProgressItem {
     // TODO: decide what to do with name... should it be part of progress item or not?
-    pub fn new<S: AsRef<str>>(name: S) -> Self {
+    pub fn new() -> Self {
         ProgressItem {
             numstages: 0,
             stages: VecDeque::new(),
@@ -392,7 +392,7 @@ mod tests {
         let mystage1 = Stage::make("wait1", future1);
         let mystage2 = Stage::make("wait2", future2);
         let mystage3 = Stage::make("wait3", future3);
-        let mut prog = ProgressItem::new("simple");
+        let mut prog = ProgressItem::new();
         prog.register_stage(mystage1);
         prog.register_stage(mystage2);
         prog.register_stage(mystage3);
@@ -427,7 +427,7 @@ mod tests {
     ) -> ProgressItem {
         let stage1 = Stage::make_simple("wait1", make_advanced_stage(wait, key.clone(), progholder));
         let stage2 = Stage::make_simple("wait2", make_advanced_stage(wait, key.clone(), progholder));
-        let mut prog = ProgressItem::new("advanced");
+        let mut prog = ProgressItem::new();
         prog.register_stage(stage1);
         prog.register_stage(stage2);
         prog
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn get_and_set_progress_percent_works() {
-        let mut myprog = ProgressItem::new("");
+        let mut myprog = ProgressItem::new();
         myprog.set_progress_percent(0.001);
         assert_eq!(myprog.get_progress_percent(), 0.001);
 
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn get_and_set_progress_percent_normalized_works() {
-        let mut myprog = ProgressItem::new("");
+        let mut myprog = ProgressItem::new();
         myprog.set_progress_percent_normalized(0.5);
         assert_eq!(myprog.get_progress_percent_normalized(), 0.5);
 
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn set_progress_percent_works() {
-        let mut myprog = ProgressItem::new("");
+        let mut myprog = ProgressItem::new();
         myprog.set_progress_percent(0.0);
         assert_eq!(myprog.get_progress(), 0);
         myprog.set_progress_percent(22.5);
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn inc_progress_works_percent() {
-        let mut myprog = ProgressItem::new("");
+        let mut myprog = ProgressItem::new();
         myprog.set_progress(TICKS_PER_PERCENT * 3);
         assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT * 3);
         myprog.inc_progress(TICKS_PER_PERCENT * 10);
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn set_progress_works() {
-        let mut myprog = ProgressItem::new("");
+        let mut myprog = ProgressItem::new();
         myprog.set_progress(TICKS_PER_PERCENT);
         assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT);
     }
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn should_auto_done_if_no_stages_provided() {
         run_in_tokio_with_static_progholder! {{
-            let mut myprog = ProgressItem::new("hello");
+            let mut myprog = ProgressItem::new();
             assert!(!myprog.is_done());
             myprog.start("a".into(), &PROGHOLDER);
             assert!(myprog.is_done());
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn should_error_if_cant_get_task_in_stage() {
         run_in_tokio_with_static_progholder! {{
-            let myprog = ProgressItem::new("hello");
+            let myprog = ProgressItem::new();
             let mut myprog = myprog.set_lock_attempt_duration(0);
             let mystage = Stage::new("a"); // no task here. should error
             myprog.register_stage(mystage);
@@ -646,7 +646,7 @@ mod tests {
         run_in_tokio_with_static_progholder! {{
             let future = download_something(3);
             let mystage = Stage::make("download_something", future);
-            let mut myprogitem = ProgressItem::new("ayyy");
+            let mut myprogitem = ProgressItem::new();
             myprogitem.register_stage(mystage);
             myprogitem.start(String::from("reeeee"), &PROGHOLDER);
         };};
@@ -662,7 +662,7 @@ mod tests {
     fn can_easily_create_a_stage_and_add_register_to_progress() {
         let future = download_something(3);
         let mystage = Stage::make("download_something", future);
-        let mut myprogitem = ProgressItem::new("ayyy");
+        let mut myprogitem = ProgressItem::new();
         myprogitem.register_stage(mystage);
     }
 
@@ -685,7 +685,7 @@ mod tests {
         // note the name of the progress item is a string
         // even though the name of the tasks are enums. this is ok
         // as long as all tasks in this progress item also have names as enums
-        let mut myprogitem = ProgressItem::new("ayy");
+        let mut myprogitem = ProgressItem::new();
         myprogitem.register_stage(mystage3);
         myprogitem.register_stage(mystage6);
         myprogitem.register_stage(mystagedone);
