@@ -347,6 +347,26 @@ pub struct ProgressHolder<K: Eq + Hash + Debug> {
     pub progresses: HashMap<K, ProgressItem>,
 }
 
+/// takes a callback to use the item referenced by the progress holder
+/// if the item is found in the progress holder, calls your provided callback
+/// otherwise does nothing
+pub fn use_me_from_progress_holder<'a, K: Eq + Hash + Debug>(
+    key: &K,
+    progholder: &'a Mutex<ProgressHolder<K>>,
+    cb: impl FnMut(&mut ProgressItem) + 'a,
+) {
+    let mut mut_cb = cb;
+    match progholder.try_lock() {
+        Err(_) => {},
+        Ok(mut guard) => match guard.progresses.get_mut(key) {
+            None => {},
+            Some(me) => {
+                mut_cb(me);
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,6 +469,41 @@ mod tests {
                 Some(progitem.get_progress())
             }
         }
+    }
+
+    #[test]
+    fn using_from_callback_works() {
+        run_in_tokio_with_static_progholder! {{
+            let key = String::from("key");
+            let myprog = make_advanced_progress_item(250, key.clone(), &PROGHOLDER);
+            let myprog = myprog.set_lock_attempt_duration(0);
+            let mut guard = PROGHOLDER.lock().unwrap();
+            guard.progresses.insert(key.clone(), myprog);
+            drop(guard);
+
+            use_me_from_progress_holder(&key, &PROGHOLDER, |me| {
+                assert_eq!(me.get_progress(), 0);
+                me.set_progress(55);
+            });
+
+            match PROGHOLDER.lock() {
+                Err(_) => assert!(false),
+                Ok(mut guard) => match guard.progresses.get_mut(&key) {
+                    None => assert!(false),
+                    Some(me) => assert_eq!(me.get_progress(), 55),
+                }
+            }
+        };};
+    }
+
+    #[test]
+    fn get_and_set_progress_percent_works() {
+        let mut myprog = ProgressItem::new("");
+        myprog.set_progress_percent(0.001);
+        assert_eq!(myprog.get_progress_percent(), 0.001);
+
+        myprog.set_progress_percent(50.0);
+        assert_eq!(myprog.get_progress_percent(), 50.0);
     }
 
     #[test]
