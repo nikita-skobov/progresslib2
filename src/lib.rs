@@ -1,15 +1,11 @@
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::fmt::Display;
 use std::future::Future;
-use std::sync::{MutexGuard, Mutex};
+use std::sync::Mutex;
 use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::pin::Pin;
-use futures::task;
-use futures_timer::Delay;
 use std::time::Duration;
-use std::task::{Context, Poll};
 
 
 pub type TaskResult = Result<(), String>;
@@ -391,7 +387,6 @@ mod tests {
     use super::*;
     use futures_timer::Delay;
     use lazy_static::lazy_static;
-    use tokio::prelude::*;
     use tokio::runtime::Runtime;
 
     async fn download_something(secs: u64) -> TaskResult {
@@ -685,7 +680,7 @@ mod tests {
     #[test]
     fn can_easily_create_a_stage() {
         let future = download_something(3);
-        let mystage = Stage::make("download_something", future);
+        let _ = Stage::make("download_something", future);
     }
 
     #[test]
