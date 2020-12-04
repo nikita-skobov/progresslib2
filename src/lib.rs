@@ -11,6 +11,12 @@ use std::time::Duration;
 pub type TaskResult = Result<(), String>;
 type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 
+/// a stage holds a single future. it is an Option<>, but
+/// a ProgressItem will not work without it being set. its only optional
+/// to make it convenient to create a stage via
+/// ```rs
+/// Stage::new("stage-name").set_task_from_future(my_async_function())
+/// ```
 pub struct Stage {
     pub name: Option<Box<dyn Debug + Send>>,
     task: Option<PinBoxFuture>,
@@ -43,6 +49,22 @@ impl Stage {
         self
     }
 
+    /// the most convenient way to make a stage. pass in a name (anything
+    /// that can be debugged and send) and the actual future. This future must
+    /// return a TaskResult, but if your future doesnt return a TaskResult,
+    /// you can use make_simple instead.
+    /// # Example:
+    /// ```rs
+    /// #[derive(Debug)]
+    /// pub enum MyStages {
+    ///     Stage1,
+    ///     Stage2,
+    /// }
+    /// pub async fn some_async_function(thing: &'static str) -> TaskResult {
+    ///   // something asynchronous...
+    /// }
+    /// Stage::make(MyStages::Stage1, some_async_function("something"))
+    /// ```
     pub fn make<F: Future<Output = TaskResult> + Send + 'static>(
         name: impl Debug + Send + 'static,
         future: F,
@@ -50,6 +72,8 @@ impl Stage {
         Stage::new(name).set_task_from_future(future)
     }
 
+    /// like make(), but the future you pass in has to return nothing instead
+    /// of a TaskResult
     pub fn make_simple<F: Future<Output = ()> + Send + 'static>(
         name: impl Debug + Send + 'static,
         future: F,
@@ -71,6 +95,17 @@ pub struct ProgressError {
     pub error_string: String,
 }
 
+/// This struct is created by the user, but none of the struct members
+/// need to be managed by the user. As the user you just need to create stages
+/// to register with this progress item, and call some setters like set_max_lock_attempts()
+/// as needed. Once this ProgressItem is created, and your stages are registered,
+/// you should create a key, then
+/// you can call progressitem.start() and pass in that key,
+/// and then insert this progress item into the ProgressHolder with that
+/// key. The ProgressItem will internally use tokio and keep passing a reference of its holder
+/// and the key around such that every time the current stage ends, it can asynchronously spawn
+/// the next stage. If there is an error handling the stage, the ProgressItem will be 'errored'
+/// which means no future progress will be made, and a field will be set to view the error message
 pub struct ProgressItem {
     stages: VecDeque<Stage>,
     started: bool,
@@ -221,6 +256,8 @@ impl ProgressItem {
         }
     }
 
+    /// can only pass stages to the progress item if
+    /// it has not started yet
     pub fn register_stage<T: Into<Stage>>(&mut self, stage: T) {
         if !self.started {
             self.stages.push_back(stage.into());
@@ -357,11 +394,16 @@ impl ProgressItem {
     }
 }
 
+/// The ProgressHolder is a simple hashmap of the progress items.
+/// It is meant to be used statically globally, and it is passed around within
+/// the ProgressItem methods as a mutex.
 #[derive(Default)]
 pub struct ProgressHolder<K: Eq + Hash + Debug> {
     pub progresses: HashMap<K, ProgressItem>,
 }
 
+/// A convenience function to easily access the ProgressItem of
+/// interest from within the mutex of the ProgressHolder.
 /// takes a callback to use the item referenced by the progress holder
 /// if the item is found in the progress holder, calls your provided callback
 /// otherwise does nothing
