@@ -412,13 +412,36 @@ pub fn use_me_from_progress_holder<'a, K: Eq + Hash + Debug>(
     progholder: &'a Mutex<ProgressHolder<K>>,
     cb: impl FnMut(&mut ProgressItem) + 'a,
 ) {
-    let mut mut_cb = cb;
+    use_me_from_progress_holder_or_error(key, progholder, cb, |_| {});
+}
+
+pub enum UseProgressError {
+    LockUnavailable,
+    KeyNotFound,
+}
+
+/// like use_me_from_progress_holder(), but also takes an error callback
+/// which will call back with an enum of the error type: either we
+/// failed to get a lock on the mutex, or we failed to find the
+/// key in the progresses hashmap
+pub fn use_me_from_progress_holder_or_error<'a, K: Eq + Hash + Debug>(
+    key: &K,
+    progholder: &'a Mutex<ProgressHolder<K>>,
+    ok_cb: impl FnMut(&mut ProgressItem) + 'a,
+    err_cb: impl FnMut(UseProgressError) + 'a,
+) {
+    let mut mut_ok_cb = ok_cb;
+    let mut mut_err_cb = err_cb;
     match progholder.try_lock() {
-        Err(_) => {},
+        Err(_) => {
+            mut_err_cb(UseProgressError::LockUnavailable);
+        },
         Ok(mut guard) => match guard.progresses.get_mut(key) {
-            None => {},
+            None => {
+                mut_err_cb(UseProgressError::KeyNotFound);
+            },
             Some(me) => {
-                mut_cb(me);
+                mut_ok_cb(me);
             }
         },
     }
