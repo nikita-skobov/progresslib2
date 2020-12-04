@@ -10,6 +10,7 @@ use std::time::Duration;
 
 pub type TaskResult = Result<(), String>;
 type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
+type PinBoxFutureSimple = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// a stage holds a single future. it is an Option<>, but
 /// a ProgressItem will not work without it being set. its only optional
@@ -116,6 +117,9 @@ pub struct ProgressItem {
     done: bool,
     max_lock_attempts: usize,
     lock_attempt_wait: u64,
+    paused: bool,
+    pause_resume: VecDeque<PinBoxFutureSimple>,
+    processing_stage: bool,
 }
 
 impl Default for ProgressItem {
@@ -130,6 +134,9 @@ impl Default for ProgressItem {
             progress: 0,
             max_lock_attempts: 3,
             lock_attempt_wait: 1000,
+            paused: false,
+            pause_resume: VecDeque::new(),
+            processing_stage: false,
         }
     }
 }
@@ -256,6 +263,44 @@ impl ProgressItem {
         }
     }
 
+    pub fn is_paused(&self) -> bool { self.paused }
+
+    /// this just sets a flag that notifies the ProgressItem once its done
+    /// whether or not it should run the next stage. it is not possible to actually
+    /// stop execution of a stage itself, but we can prevent future stages from running.
+    pub fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    pub fn toggle_pause(&mut self) {
+        if self.paused {
+            self.resume();
+        } else {
+            self.pause();
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if !self.paused {
+            return;
+        }
+        // if we are already on a stage and the user calls unpause
+        // that is to be treated as simply changing a flag.
+        if self.processing_stage {
+            self.paused = false;
+            return;
+        }
+        // however, if we are already in a paused state where we
+        // are not processing anything, then we want to resume progress
+        // by running the next stage in the queue.
+        if let Some(task) = self.pause_resume.pop_front() {
+            tokio::spawn(async move {
+                task.await;
+            });
+        }
+        self.paused = false;
+    }
+
     /// can only pass stages to the progress item if
     /// it has not started yet
     pub fn register_stage<T: Into<Stage>>(&mut self, stage: T) {
@@ -311,6 +356,7 @@ impl ProgressItem {
                         lock_attempt_wait
                     );
                 });
+                self.processing_stage = true;
                 // this is the desirable path, return here
                 return;
             }
@@ -373,9 +419,32 @@ impl ProgressItem {
                 None => {}, // nothing we can do :shrug:
                 Some(me) => match is_error {
                     None => {
-                        me.do_stage(key, holder, stage_index + 1);
+                        me.processing_stage = false;
+                        if !me.paused {
+                            me.do_stage(key, holder, stage_index + 1);
+                        } else {
+                            // if we are paused, create a future
+                            // of what we will eventually do when we get unpaused.
+                            let asynctask = async move {
+                                match holder.lock() {
+                                    Err(_) => {}
+                                    Ok(mut guard) => {
+                                        match guard.progresses.get_mut(&key) {
+                                            None => {}
+                                            Some(next_me) => {
+                                                next_me.do_stage(key, holder, stage_index + 1);
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            // an internal member used to hold this future for later
+                            // when we unpause
+                            me.pause_resume.push_back(Box::pin(asynctask));
+                        }
                     },
                     Some(error_string) => {
+                        me.processing_stage = false;
                         me.errored = Some(ProgressError {
                             error_string,
                             progress_index: stage_index,
@@ -548,6 +617,61 @@ mod tests {
                 Some(progitem.get_progress())
             }
         }
+    }
+
+    #[test]
+    fn can_pause_progress() {
+        run_in_tokio_with_static_progholder! {{
+            let key = String::from("key");
+            let myprog = make_advanced_progress_item(100, key.clone(), &PROGHOLDER);
+            let mut myprog = myprog.set_lock_attempt_duration(0);
+            let mut guard = PROGHOLDER.lock().unwrap();
+            myprog.start(key.clone(), &PROGHOLDER);
+            guard.progresses.insert(key.clone(), myprog);
+            drop(guard);
+
+
+            // we should still be on the first progres stage "wait1"
+            delay_millis(100 * 3).await;
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                let progress_name = me.get_stage_name();
+                assert!(progress_name.contains("wait1"));
+                // here we should be able to pause it
+                // and if we wait another few seconds
+                // we should still be on stage wait1
+                // because we never progressed to wait2
+                me.pause();
+            }, |_| {
+                assert!(false);
+            });
+
+            // so now if we wait another 300ms, we normally would have
+            // been on the next stage: wait2, but since we paused it
+            // we should still be on wait1...
+            delay_millis(300).await;
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                let progress_name = me.get_stage_name();
+                assert!(progress_name.contains("wait1"));
+            }, |_| {
+                assert!(false);
+            });
+
+            // then we can also resume progress and check again to see
+            // that it should have gone to the next stage
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                me.resume();
+            }, |_| {
+                assert!(false);
+            });
+
+            delay_millis(100).await;
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                let progress_name = me.get_stage_name();
+                assert!(progress_name.contains("wait2"));
+            }, |_| {
+                assert!(false);
+            });
+        };};
     }
 
     #[test]
