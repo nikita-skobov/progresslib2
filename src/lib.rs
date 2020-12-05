@@ -23,6 +23,43 @@ pub struct Stage {
     task: Option<PinBoxFuture>,
 }
 
+
+/// same as `make_stage_simple`, but the $func must return a TaskResult
+#[macro_export]
+macro_rules! make_stage {
+    ($func:ident; $($t:tt)*) => (
+        Stage::make(
+            stringify!($func),
+            $func( $($t)* )
+        )
+    )
+}
+
+/// a convenience macro to turn a function call into a stage.
+/// Here's what making a stage would look like without this macro:
+/// ```rs
+/// pub async fn my_task(key: String) {}
+///
+/// pub fn uses_stage(key: String) {
+///   let my_stage = Stage::make_simple("my_task", my_task(key));
+/// }
+/// ```
+/// And here's how this macro makes stage creation simpler:
+/// ```rs
+/// pub fn uses_stage(key: String) {
+///   let my_stage = make_stage_simple!(my_task; key);
+/// }
+/// ```
+#[macro_export]
+macro_rules! make_stage_simple {
+    ($func:ident; $($t:tt)*) => (
+        Stage::make_simple(
+            stringify!($func),
+            $func( $($t)* )
+        )
+    )
+}
+
 impl Stage {
     pub fn new(name: impl Debug + Send + 'static) -> Self {
         Stage {
@@ -533,6 +570,8 @@ mod tests {
         Delay::new(duration).await;
     }
 
+    async fn task_no_args() { }
+
     fn make_simple_progress_item(wait1: u64, wait2: u64, wait3: u64) -> ProgressItem {
         let future1 = download_something(wait1);
         let future2 = download_something(wait2);
@@ -903,5 +942,35 @@ mod tests {
         myprogitem.register_stage(mystage3);
         myprogitem.register_stage(mystage6);
         myprogitem.register_stage(mystagedone);
+    }
+
+    #[test]
+    fn make_stage_macros_work() {
+        let mystage1 = make_stage!(download_something; 2);
+        match mystage1.name {
+            None => assert!(false),
+            Some(name) => {
+                let name_string = format!("{:?}", name);
+                assert!(name_string.contains("download_something"));
+            }
+        }
+
+        let mystage2 = make_stage_simple!(delay_millis; 2);
+        match mystage2.name {
+            None => assert!(false),
+            Some(name) => {
+                let name_string = format!("{:?}", name);
+                assert!(name_string.contains("delay_millis"));
+            }
+        }
+
+        let mystage3 = make_stage_simple!(task_no_args; );
+        match mystage3.name {
+            None => assert!(false),
+            Some(name) => {
+                let name_string = format!("{:?}", name);
+                assert!(name_string.contains("task_no_args"));
+            }
+        }
     }
 }

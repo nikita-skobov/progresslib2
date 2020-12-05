@@ -166,13 +166,10 @@ async fn download(item: web::Json<DownloadRequest>) -> HttpResponse {
     // which returns a future. this future does not run anything until
     // we call progitem.start() below. note we can pass a reference to PROGHOLDER
     // only because it is static.
-    let download_stage = Stage::make(
-        "download",
-        download_video(
-            download_request.url.clone(),
-            download_request.name.clone(),
-            &PROGHOLDER,
-        )
+    let download_stage = make_stage!(download_video;
+        download_request.url.clone(),
+        download_request.name.clone(),
+        &PROGHOLDER,
     );
     let mut progitem = ProgressItem::new();
     progitem.register_stage(download_stage);
