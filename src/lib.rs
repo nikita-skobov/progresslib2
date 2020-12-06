@@ -143,11 +143,11 @@ pub struct ProgressError {
 /// stages it needs to do
 #[derive(Debug)]
 pub struct StageView {
-    progress_percent: f64,
-    name: String,
-    index: usize,
-    errored: Option<ProgressError>,
-    currently_processing: bool,
+    pub progress_percent: f64,
+    pub name: String,
+    pub index: usize,
+    pub errored: Option<ProgressError>,
+    pub currently_processing: bool,
 }
 
 impl From<&mut ProgressItem> for Vec<StageView> {
