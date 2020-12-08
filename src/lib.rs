@@ -126,11 +126,82 @@ impl Stage {
 pub const MAX_PROGRESS_TICKS: u32 = 100_000;
 pub const TICKS_PER_PERCENT: u32 = MAX_PROGRESS_TICKS / 100;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProgressError {
     pub name: Option<String>,
     pub progress_index: usize,
     pub error_string: String,
+}
+
+/// meant to be used as a clone of a ProgressItem for when
+/// you want to view the state of a progress item without
+/// manually getting all of the fields, and unwrapping
+/// the internal structure. This StageView
+/// represents the view of a single stage. but from a ProgressItem,
+/// you should be able to get a vec of stage views of all of the stages
+/// that its already done, the current stage it is on, and  the remaining
+/// stages it needs to do
+#[derive(Debug)]
+pub struct StageView {
+    pub progress_percent: f64,
+    pub name: String,
+    pub index: usize,
+    pub errored: Option<ProgressError>,
+    pub currently_processing: bool,
+}
+
+impl From<&mut ProgressItem> for Vec<StageView> {
+    fn from(orig: &mut ProgressItem) -> Self {
+        // do all the past stages first
+        let mut stages = vec![];
+        let mut stage_index = 0;
+        for past_stage_name in &orig.past_stage_names {
+            stages.push(StageView {
+                progress_percent: 100.0, // if its a past stage, 100% is implied
+                name: past_stage_name.clone(),
+                index: stage_index,
+                errored: None, // if its a past stage it is implied that it is not errored
+                currently_processing: false, // also implied because it is done
+            });
+            stage_index += 1;
+        }
+
+        // do the current stage
+        let current_stage_name = orig.get_stage_name();
+        stages.push(StageView {
+            name: current_stage_name,
+            progress_percent: orig.get_progress_percent(),
+            index: stage_index,
+            errored: orig.errored.clone(),
+            currently_processing: orig.processing_stage,
+        });
+        stage_index += 1;
+
+        if orig.stages.len() == 0 {
+            // this means that the "current"
+            // stage above is actually done, so we can treat it
+            // as done:
+            let last_stage_index = stages.len() - 1;
+            stages[last_stage_index].progress_percent = 100.0;
+        } else {
+            // do the remaining stages
+            for stage in orig.stages.iter() {
+                stages.push(StageView {
+                    name: match stage.name {
+                        Some(ref name) => format!("{:?}", name),
+                        None => stage_index.to_string(),
+                    },
+                    progress_percent: 0.0, // implied because it hasnt started yet,
+                    index: stage_index,
+                    errored: None, // implied because it hasnt started yet
+                    currently_processing: false,
+                });
+                stage_index += 1;
+            }
+        }
+
+        stages
+    }
 }
 
 /// This struct is created by the user, but none of the struct members
@@ -145,6 +216,7 @@ pub struct ProgressError {
 /// the next stage. If there is an error handling the stage, the ProgressItem will be 'errored'
 /// which means no future progress will be made, and a field will be set to view the error message
 pub struct ProgressItem {
+    past_stage_names: Vec<String>,
     stages: VecDeque<Stage>,
     started: bool,
     numstages: usize,
@@ -162,6 +234,7 @@ pub struct ProgressItem {
 impl Default for ProgressItem {
     fn default() -> Self {
         ProgressItem {
+            past_stage_names: vec![],
             numstages: 0,
             stages: VecDeque::new(),
             started: false,
@@ -369,6 +442,17 @@ impl ProgressItem {
         }
         let max_lock_attempts = self.max_lock_attempts;
         let lock_attempt_wait = self.lock_attempt_wait;
+
+        // if we did a stage before this one, then
+        // self.current_stage should be set, so we add that
+        // to the past stage list
+        if let Some((index, stage)) = &self.current_stage {
+            let past_stage_name = match stage.name {
+                Some(ref name) => format!("{:?}", name),
+                None => index.to_string(),
+            };
+            self.past_stage_names.push(past_stage_name);
+        }
 
         if let Some(stage) = self.stages.pop_front() {
             if let Some(task) = stage.task {
@@ -656,6 +740,76 @@ mod tests {
                 Some(progitem.get_progress())
             }
         }
+    }
+
+    #[test]
+    fn can_get_stage_view_vec() {
+        run_in_tokio_with_static_progholder! {{
+            let key = String::from("key");
+            let wait = 100; // millis. each advanced stage does wait * 4
+            let stage1 = Stage::make_simple("wait1", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
+            let stage2 = Stage::make_simple("wait2", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
+            let stage3 = Stage::make_simple("wait3", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
+            let stage4 = Stage::make_simple("wait4", async {});
+            let mut prog = ProgressItem::new();
+            prog.register_stage(stage1);
+            prog.register_stage(stage2);
+            prog.register_stage(stage3);
+            prog.register_stage(stage4);
+
+            let mut prog = prog.set_lock_attempt_duration(0);
+            let mut guard = PROGHOLDER.lock().unwrap();
+            prog.start(key.clone(), &PROGHOLDER);
+            guard.progresses.insert(key.clone(), prog);
+            drop(guard);
+
+            // let it run until its somewhere in the middle of stage 2
+            delay_millis(wait * 4 + 10).await;
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                let progress_name = me.get_stage_name();
+                assert!(progress_name.contains("wait2"));
+                // now here we get its stage view
+                let stage_view_vec: Vec<StageView> = me.into();
+                assert_eq!(stage_view_vec.len(), 4);
+                let first = &stage_view_vec[0];
+                let second = &stage_view_vec[1];
+                let third = &stage_view_vec[2];
+
+                assert_eq!(first.index, 0);
+                assert_eq!(first.progress_percent, 100.0);
+                assert!(first.name.contains("wait1"));
+                assert!(!first.currently_processing);
+
+                // check if its actually somewhere
+                // in the middle of its progress
+                assert!(second.progress_percent > 0.0);
+                assert!(second.progress_percent < 100.0);
+                assert!(second.currently_processing);
+                assert_eq!(second.index, 1);
+
+                assert_eq!(third.progress_percent, 0.0);
+                assert!(third.name.contains("wait3"));
+                assert_eq!(third.index, 2);
+                assert!(!third.currently_processing);
+            }, |_| {
+                assert!(false);
+            });
+
+            // if we wait until all stages are done,
+            // we should see that the last stage
+            // is at 100% even if it didnt update its own progress
+            delay_millis(wait * 4 * 2).await;
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                let stage_view_vec: Vec<StageView> = me.into();
+                let last = &stage_view_vec[3];
+                assert_eq!(last.progress_percent, 100.0);
+                assert!(last.name.contains("wait4"));
+                assert_eq!(last.index, 3);
+                assert!(!last.currently_processing);
+            }, |_| {
+                assert!(false);
+            })
+        };};
     }
 
     #[test]
