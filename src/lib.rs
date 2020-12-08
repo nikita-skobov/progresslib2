@@ -738,14 +738,16 @@ mod tests {
     fn can_get_stage_view_vec() {
         run_in_tokio_with_static_progholder! {{
             let key = String::from("key");
-            let wait = 100;
+            let wait = 100; // millis. each advanced stage does wait * 4
             let stage1 = Stage::make_simple("wait1", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
             let stage2 = Stage::make_simple("wait2", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
             let stage3 = Stage::make_simple("wait3", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
+            let stage4 = Stage::make_simple("wait4", async {});
             let mut prog = ProgressItem::new();
             prog.register_stage(stage1);
             prog.register_stage(stage2);
             prog.register_stage(stage3);
+            prog.register_stage(stage4);
 
             let mut prog = prog.set_lock_attempt_duration(0);
             let mut guard = PROGHOLDER.lock().unwrap();
@@ -760,7 +762,7 @@ mod tests {
                 assert!(progress_name.contains("wait2"));
                 // now here we get its stage view
                 let stage_view_vec: Vec<StageView> = me.into();
-                assert_eq!(stage_view_vec.len(), 3);
+                assert_eq!(stage_view_vec.len(), 4);
                 let first = &stage_view_vec[0];
                 let second = &stage_view_vec[1];
                 let third = &stage_view_vec[2];
@@ -784,6 +786,21 @@ mod tests {
             }, |_| {
                 assert!(false);
             });
+
+            // if we wait until all stages are done,
+            // we should see that the last stage
+            // is at 100% even if it didnt update its own progress
+            delay_millis(wait * 4 * 2).await;
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                let stage_view_vec: Vec<StageView> = me.into();
+                let last = &stage_view_vec[3];
+                assert_eq!(last.progress_percent, 100.0);
+                assert!(last.name.contains("wait4"));
+                assert_eq!(last.index, 3);
+                assert!(!last.currently_processing);
+            }, |_| {
+                assert!(false);
+            })
         };};
     }
 
