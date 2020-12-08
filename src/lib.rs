@@ -177,19 +177,27 @@ impl From<&mut ProgressItem> for Vec<StageView> {
         });
         stage_index += 1;
 
-        // do the remaining stages
-        for stage in orig.stages.iter() {
-            stages.push(StageView {
-                name: match stage.name {
-                    Some(ref name) => format!("{:?}", name),
-                    None => stage_index.to_string(),
-                },
-                progress_percent: 0.0, // implied because it hasnt started yet,
-                index: stage_index,
-                errored: None, // implied because it hasnt started yet
-                currently_processing: false,
-            });
-            stage_index += 1;
+        if orig.stages.len() == 0 {
+            // this means that the "current"
+            // stage above is actually done, so we can treat it
+            // as done:
+            let last_stage_index = stages.len() - 1;
+            stages[last_stage_index].progress_percent = 100.0;
+        } else {
+            // do the remaining stages
+            for stage in orig.stages.iter() {
+                stages.push(StageView {
+                    name: match stage.name {
+                        Some(ref name) => format!("{:?}", name),
+                        None => stage_index.to_string(),
+                    },
+                    progress_percent: 0.0, // implied because it hasnt started yet,
+                    index: stage_index,
+                    errored: None, // implied because it hasnt started yet
+                    currently_processing: false,
+                });
+                stage_index += 1;
+            }
         }
 
         stages
