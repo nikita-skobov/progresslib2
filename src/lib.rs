@@ -177,7 +177,7 @@ impl From<&mut ProgressItem> for Vec<StageView> {
         });
         stage_index += 1;
 
-        if orig.stages.len() == 0 {
+        if orig.stages.len() == 0 && !orig.processing_stage {
             // this means that the "current"
             // stage above is actually done, so we can treat it
             // as done:
@@ -750,7 +750,9 @@ mod tests {
             let stage1 = Stage::make_simple("wait1", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
             let stage2 = Stage::make_simple("wait2", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
             let stage3 = Stage::make_simple("wait3", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
-            let stage4 = Stage::make_simple("wait4", async {});
+            let stage4 = Stage::make_simple("wait4", async {
+                delay_millis(1000).await;
+            });
             let mut prog = ProgressItem::new();
             prog.register_stage(stage1);
             prog.register_stage(stage2);
@@ -795,10 +797,24 @@ mod tests {
                 assert!(false);
             });
 
-            // if we wait until all stages are done,
-            // we should see that the last stage
-            // is at 100% even if it didnt update its own progress
+            // if we wait until first 3 stages are done
+            // the last stage should be at 0% at first
+            // while its processing (and it never updates itself)
             delay_millis(wait * 4 * 2).await;
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                let stage_view_vec: Vec<StageView> = me.into();
+                let last = &stage_view_vec[3];
+                assert_eq!(last.progress_percent, 0.0);
+                assert!(last.name.contains("wait4"));
+                assert_eq!(last.index, 3);
+                assert!(last.currently_processing);
+            }, |_| {
+                assert!(false);
+            });
+
+            // then we wait for the last stage to finish, and it
+            // should have a progress of 100.0 implicitly
+            delay_millis(1000).await;
             use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
                 let stage_view_vec: Vec<StageView> = me.into();
                 let last = &stage_view_vec[3];
