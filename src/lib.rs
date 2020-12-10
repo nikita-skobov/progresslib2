@@ -9,7 +9,7 @@ use std::{any::Any, time::Duration};
 
 
 pub type ProgressVars = HashMap<String, Box<dyn Any>>;
-pub type TaskResult = Result<(), String>;
+pub type TaskResult = Result<Option<ProgressVars>, String>;
 type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 type PinBoxFutureSimple = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -83,7 +83,7 @@ impl Stage {
     ) -> Self {
         self.task = Some(Box::pin(async move {
             future.await;
-            Ok(())
+            Ok(None)
         }));
         self
     }
@@ -119,7 +119,7 @@ impl Stage {
     ) -> Self {
         Stage::new(name).set_task_from_future(async move {
             future.await;
-            Ok(())
+            Ok(None)
         })
     }
 }
@@ -647,7 +647,7 @@ mod tests {
 
     async fn download_something(secs: u64) -> TaskResult {
         delay_millis(secs * 1000).await;
-        Ok(())
+        Ok(None)
     }
 
     async fn delay_millis(millis: u64) {

@@ -116,7 +116,7 @@ pub async fn download_video(
     };
 
     match status.success() {
-        true => Ok(()),
+        true => Ok(None),
         false => {
             let error_code = status.code();
             if let None = error_code {
