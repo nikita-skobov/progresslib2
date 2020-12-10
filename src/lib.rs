@@ -409,11 +409,7 @@ impl ProgressItem {
 
                 tokio::spawn(async move {
                     let task_result = task.await;
-                    // let is_error = match task_result {
-                    //     Ok(_) => None,
-                    //     Err(s) => Some(s),
-                    // };
-                    Self::handle_end_of_stage(
+                    handle_end_of_stage(
                         key,
                         holder,
                         stage_index,
@@ -430,7 +426,7 @@ impl ProgressItem {
 
         // if we failed to get a stage, or we failed to get a task
         // from that stage, then we will consider that an error
-        Self::handle_end_of_stage(
+        handle_end_of_stage(
             key,
             holder,
             stage_index,
@@ -439,103 +435,127 @@ impl ProgressItem {
             lock_attempt_wait,
         );
     }
+}
 
-    pub fn handle_end_of_stage<K: Eq + Hash + Debug + Send>(
-        key: K,
-        holder: &'static Mutex<ProgressHolder<K>>,
-        stage_index: usize,
-        task_result: TaskResult,
-        max_lock_attempts: usize,
-        lock_attempt_wait: u64,
-    ) {
-        tokio::spawn(async move {
-            // delay first because otherwise doesnt seem we can build the await
-            // state machine :(
-            tokio::time::delay_for(Duration::from_millis(lock_attempt_wait)).await;
-            // then we try to get a lock
-            let mut guard = match holder.try_lock() {
-                Err(_) => {
-                    // if we fail to get a lock, try again by calling this recursively
-                    let new_lock_attempts = if max_lock_attempts == 0 {
-                        max_lock_attempts
-                    } else if max_lock_attempts - 1 == 0 {
-                        // if it would reduce to 0, then stop here otherwise wed
-                        // have infinite loop on account of the above condition
-                        return;
-                    } else {
-                        max_lock_attempts - 1
-                    };
-
-                    Self::handle_end_of_stage(
-                        key,
-                        holder,
-                        stage_index,
-                        task_result,
-                        new_lock_attempts,
-                        lock_attempt_wait,
-                    );
+pub fn handle_end_of_stage<K: Eq + Hash + Debug + Send>(
+    key: K,
+    holder: &'static Mutex<ProgressHolder<K>>,
+    stage_index: usize,
+    task_result: TaskResult,
+    max_lock_attempts: usize,
+    lock_attempt_wait: u64,
+) {
+    tokio::spawn(async move {
+        // delay first because otherwise doesnt seem we can build the await
+        // state machine :(
+        tokio::time::delay_for(Duration::from_millis(lock_attempt_wait)).await;
+        // then we try to get a lock
+        let mut guard = match holder.try_lock() {
+            Err(_) => {
+                // if we fail to get a lock, try again by calling this recursively
+                let new_lock_attempts = if max_lock_attempts == 0 {
+                    max_lock_attempts
+                } else if max_lock_attempts - 1 == 0 {
+                    // if it would reduce to 0, then stop here otherwise wed
+                    // have infinite loop on account of the above condition
                     return;
-                }
-                Ok(guard) => guard,
-            };
+                } else {
+                    max_lock_attempts - 1
+                };
 
-            // if we got the lock, handle it: if is_error, then set self.errored
-            // otherwise process the next stage
-            match guard.progresses.get_mut(&key) {
-                None => {}, // nothing we can do :shrug:
-                Some(me) => match task_result {
-                    Ok(vars_option) => {
-                        // if given variables, apply
-                        // these to me so that future
-                        // stages can see these vars.
-                        if let Some(mut vars) = vars_option {
-                            for (key, value) in vars.drain_vars() {
-                                me.insert_var(key, value);
-                            }
-                        }
+                handle_end_of_stage(
+                    key,
+                    holder,
+                    stage_index,
+                    task_result,
+                    new_lock_attempts,
+                    lock_attempt_wait,
+                );
+                return;
+            }
+            Ok(guard) => guard,
+        };
 
-                        me.processing_stage = false;
-                        if !me.paused {
-                            me.do_stage(key, holder, stage_index + 1);
-                        } else {
-                            // if we are paused, create a future
-                            // of what we will eventually do when we get unpaused.
-                            let asynctask = async move {
-                                match holder.lock() {
-                                    Err(_) => {}
-                                    Ok(mut guard) => {
-                                        match guard.progresses.get_mut(&key) {
-                                            None => {}
-                                            Some(next_me) => {
-                                                next_me.do_stage(key, holder, stage_index + 1);
-                                            }
-                                        }
-                                    }
-                                }
-                            };
-                            // an internal member used to hold this future for later
-                            // when we unpause
-                            me.pause_resume.push_back(Box::pin(asynctask));
+        // if we got the lock, handle it: if is_error, then set self.errored
+        // otherwise process the next stage
+        match guard.progresses.get_mut(&key) {
+            None => {}, // nothing we can do :shrug:
+            Some(me) => match task_result {
+                Ok(vars_option) => me_do_next_stage(
+                    me,
+                    holder,
+                    key,
+                    stage_index,
+                    vars_option
+                ),
+                Err(error_string) => me_set_error(
+                    me,
+                    stage_index,
+                    error_string
+                ),
+            }
+        }
+    });
+}
+
+pub fn me_do_next_stage<K: Eq + Hash + Debug + Send>(
+    me: &mut ProgressItem,
+    holder: &'static Mutex<ProgressHolder<K>>,
+    key: K,
+    stage_index: usize,
+    vars_option: Option<ProgressVars>,
+) {
+    // if given variables, apply
+    // these to me so that future
+    // stages can see these vars.
+    if let Some(mut vars) = vars_option {
+        for (key, value) in vars.drain_vars() {
+            me.insert_var(key, value);
+        }
+    }
+
+    me.processing_stage = false;
+    if !me.paused {
+        me.do_stage(key, holder, stage_index + 1);
+    } else {
+        // if we are paused, create a future
+        // of what we will eventually do when we get unpaused.
+        let asynctask = async move {
+            match holder.lock() {
+                Err(_) => {}
+                Ok(mut guard) => {
+                    match guard.progresses.get_mut(&key) {
+                        None => {}
+                        Some(next_me) => {
+                            next_me.do_stage(key, holder, stage_index + 1);
                         }
-                    },
-                    Err(error_string) => {
-                        me.processing_stage = false;
-                        me.errored = Some(ProgressError {
-                            error_string,
-                            progress_index: stage_index,
-                            name: match me.current_stage {
-                                None => None,
-                                Some(ref tuple) => match tuple.1.name {
-                                    None => None,
-                                    Some(ref name) => Some(format!("{:?}", name)),
-                                }
-                            }
-                        });
-                    },
+                    }
                 }
             }
-        });
+        };
+        // an internal member used to hold this future for later
+        // when we unpause
+        me.pause_resume.push_back(Box::pin(asynctask));
     }
+}
+
+pub fn me_set_error(
+    me: &mut ProgressItem,
+    stage_index: usize,
+    error_string: String,
+) {
+    me.processing_stage = false;
+    me.errored = Some(ProgressError {
+        error_string,
+        progress_index: stage_index,
+        name: match me.current_stage {
+            None => None,
+            Some(ref tuple) => match tuple.1.name {
+                None => None,
+                Some(ref name) => Some(format!("{:?}", name)),
+            }
+        }
+    });
 }
 
 /// The ProgressHolder is a simple hashmap of the progress items.
