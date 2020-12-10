@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::{any::Any, time::Duration};
 
 
-pub type ProgressVars = HashMap<String, Box<dyn Any>>;
+pub type ProgressVars = HashMap<String, Box<dyn Any + Send>>;
 pub type TaskResult = Result<Option<ProgressVars>, String>;
 type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 type PinBoxFutureSimple = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -230,6 +230,7 @@ pub struct ProgressItem {
     paused: bool,
     pause_resume: VecDeque<PinBoxFutureSimple>,
     processing_stage: bool,
+    vars: ProgressVars,
 }
 
 impl Default for ProgressItem {
@@ -248,6 +249,7 @@ impl Default for ProgressItem {
             paused: false,
             pause_resume: VecDeque::new(),
             processing_stage: false,
+            vars: ProgressVars::new(),
         }
     }
 }
@@ -465,15 +467,15 @@ impl ProgressItem {
 
                 tokio::spawn(async move {
                     let task_result = task.await;
-                    let is_error = match task_result {
-                        Ok(_) => None,
-                        Err(s) => Some(s),
-                    };
+                    // let is_error = match task_result {
+                    //     Ok(_) => None,
+                    //     Err(s) => Some(s),
+                    // };
                     Self::handle_end_of_stage(
                         key,
                         holder,
                         stage_index,
-                        is_error,
+                        task_result,
                         max_lock_attempts,
                         lock_attempt_wait
                     );
@@ -490,7 +492,7 @@ impl ProgressItem {
             key,
             holder,
             stage_index,
-            Some("Failed to run stage".into()),
+            Err("Failed to run stage".into()),
             max_lock_attempts,
             lock_attempt_wait,
         );
@@ -500,7 +502,7 @@ impl ProgressItem {
         key: K,
         holder: &'static Mutex<ProgressHolder<K>>,
         stage_index: usize,
-        is_error: Option<String>,
+        task_result: TaskResult,
         max_lock_attempts: usize,
         lock_attempt_wait: u64,
     ) {
@@ -526,7 +528,7 @@ impl ProgressItem {
                         key,
                         holder,
                         stage_index,
-                        is_error,
+                        task_result,
                         new_lock_attempts,
                         lock_attempt_wait,
                     );
@@ -539,8 +541,8 @@ impl ProgressItem {
             // otherwise process the next stage
             match guard.progresses.get_mut(&key) {
                 None => {}, // nothing we can do :shrug:
-                Some(me) => match is_error {
-                    None => {
+                Some(me) => match task_result {
+                    Ok(_) => {
                         me.processing_stage = false;
                         if !me.paused {
                             me.do_stage(key, holder, stage_index + 1);
@@ -565,7 +567,7 @@ impl ProgressItem {
                             me.pause_resume.push_back(Box::pin(asynctask));
                         }
                     },
-                    Some(error_string) => {
+                    Err(error_string) => {
                         me.processing_stage = false;
                         me.errored = Some(ProgressError {
                             error_string,
