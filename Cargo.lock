@@ -480,6 +480,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "delegate"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a57ed03a3563e9d6214c1eec5bd3b151fc21fb2052448b97692c8df30d113c8c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "derive_more"
 version = "0.99.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1162,6 +1173,7 @@ name = "progresslib2"
 version = "2.0.0"
 dependencies = [
  "actix-web",
+ "delegate",
  "futures",
  "futures-timer",
  "lazy_static",
