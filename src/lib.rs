@@ -6,9 +6,14 @@ use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::{any::Any, time::Duration};
+use delegate::delegate;
+use std::collections::hash_map::Drain;
 
 
-pub type ProgressVars = HashMap<String, Box<dyn Any + Send>>;
+mod progress_vars;
+pub use progress_vars::*;
+
+// pub type ProgressVars = HashMap<String, Box<dyn Any + Send>>;
 pub type TaskResult = Result<Option<ProgressVars>, String>;
 type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 type PinBoxFutureSimple = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -249,12 +254,14 @@ impl Default for ProgressItem {
             paused: false,
             pause_resume: VecDeque::new(),
             processing_stage: false,
-            vars: ProgressVars::new(),
+            vars: ProgressVars::default(),
         }
     }
 }
 
 impl ProgressItem {
+    delegate_progressvars_on!(vars);
+
     // TODO: decide what to do with name... should it be part of progress item or not?
     pub fn new() -> Self {
         Self::default()
@@ -422,26 +429,6 @@ impl ProgressItem {
         }
     }
 
-    /// this returns the Box<dyn Any> that
-    /// is referenced by the key. if you want this
-    /// variable to be reused later, you must
-    /// reinsert it by calling insert_var
-    pub fn extract_var<S: AsRef<str>>(&mut self, key: S) -> Option<Box<dyn Any + Send>>{
-        self.vars.remove(key.as_ref())
-    }
-
-    /// creates a string from your key to be inserted
-    /// into the vars hashmap. no check is done to see
-    /// if the variable exists prior to inserting, so
-    /// that is up to you to do by checking var_exists if desired
-    pub fn insert_var<S: AsRef<str>>(&mut self, key: S, boxed: Box<dyn Any + Send>) {
-        self.vars.insert(key.as_ref().to_string(), boxed);
-    }
-
-    pub fn var_exists<S: AsRef<str>>(&self, key: S) -> bool {
-        self.vars.contains_key(key.as_ref())
-    }
-
     pub fn start<K: Eq + Hash + Debug + Send>(
         &mut self,
         key: K,
@@ -567,8 +554,8 @@ impl ProgressItem {
                         // these to me so that future
                         // stages can see these vars.
                         if let Some(mut vars) = vars_option {
-                            for (key, value) in vars.drain() {
-                                me.vars.insert(key, value);
+                            for (key, value) in vars.drain_vars() {
+                                me.insert_var(key, value);
                             }
                         }
 
@@ -782,9 +769,9 @@ mod tests {
             // then stage2 will try to read them
             let stage1 = Stage::make("wait1", async {
                 delay_millis(1000).await;
-                let mut vars = ProgressVars::new();
-                vars.insert("testkey1".into(), Box::new("testvalue"));
-                vars.insert("testkey2".into(), Box::new(100));
+                let mut vars = ProgressVars::default();
+                vars.insert_var("testkey1", Box::new("testvalue"));
+                vars.insert_var("testkey2", Box::new(100));
                 Ok(Some(vars))
             });
             let stage2 = Stage::make("wait2", async {
@@ -828,22 +815,6 @@ mod tests {
             // if the vars exist
             delay_millis(1010).await;
         };};
-    }
-
-    #[test]
-    fn can_use_progress_vars() {
-        let mut progvars = ProgressVars::new();
-        let key = "key";
-        progvars.insert(
-            String::from(key),
-            Box::new(String::from("some value"))
-        );
-        let boxed = progvars.remove(key).unwrap();
-        if let Ok(x) = boxed.downcast::<String>() {
-            assert_eq!(x.as_str(), "some value");
-        } else {
-            assert!(false);
-        }
     }
 
     #[test]
