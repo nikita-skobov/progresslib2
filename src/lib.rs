@@ -422,6 +422,26 @@ impl ProgressItem {
         }
     }
 
+    /// this returns the Box<dyn Any> that
+    /// is referenced by the key. if you want this
+    /// variable to be reused later, you must
+    /// reinsert it by calling insert_var
+    pub fn extract_var<S: AsRef<str>>(&mut self, key: S) -> Option<Box<dyn Any + Send>>{
+        self.vars.remove(key.as_ref())
+    }
+
+    /// creates a string from your key to be inserted
+    /// into the vars hashmap. no check is done to see
+    /// if the variable exists prior to inserting, so
+    /// that is up to you to do by checking var_exists if desired
+    pub fn insert_var<S: AsRef<str>>(&mut self, key: S, boxed: Box<dyn Any + Send>) {
+        self.vars.insert(key.as_ref().to_string(), boxed);
+    }
+
+    pub fn var_exists<S: AsRef<str>>(&self, key: S) -> bool {
+        self.vars.contains_key(key.as_ref())
+    }
+
     pub fn start<K: Eq + Hash + Debug + Send>(
         &mut self,
         key: K,
@@ -542,7 +562,16 @@ impl ProgressItem {
             match guard.progresses.get_mut(&key) {
                 None => {}, // nothing we can do :shrug:
                 Some(me) => match task_result {
-                    Ok(_) => {
+                    Ok(vars_option) => {
+                        // if given variables, apply
+                        // these to me so that future
+                        // stages can see these vars.
+                        if let Some(mut vars) = vars_option {
+                            for (key, value) in vars.drain() {
+                                me.vars.insert(key, value);
+                            }
+                        }
+
                         me.processing_stage = false;
                         if !me.paused {
                             me.do_stage(key, holder, stage_index + 1);
@@ -743,6 +772,62 @@ mod tests {
                 Some(progitem.get_progress())
             }
         }
+    }
+
+    #[test]
+    fn progress_can_set_and_view_vars() {
+        run_in_tokio_with_static_progholder! {{
+            let key = String::from("key");
+            // stage1 will return some variables
+            // then stage2 will try to read them
+            let stage1 = Stage::make("wait1", async {
+                delay_millis(1000).await;
+                let mut vars = ProgressVars::new();
+                vars.insert("testkey1".into(), Box::new("testvalue"));
+                vars.insert("testkey2".into(), Box::new(100));
+                Ok(Some(vars))
+            });
+            let stage2 = Stage::make("wait2", async {
+                use_me_from_progress_holder_or_error(&String::from("key"), &PROGHOLDER, |me| {
+                    assert!(me.var_exists("testkey1"));
+                    assert!(me.var_exists("testkey2"));
+                    // TODO: check if you can downcast...
+                    let boxstr = me.extract_var("testkey1").unwrap();
+                    let boxstr = boxstr.downcast::<&str>().unwrap();
+                    assert_eq!(*boxstr, "testvalue");
+
+                    let boxint = me.extract_var("testkey2").unwrap();
+                    let boxint = boxint.downcast::<i32>().unwrap();
+                    assert_eq!(*boxint, 100);
+                }, |_| {
+                    assert!(false);
+                });
+                Ok(None)
+            });
+            let mut myprog = ProgressItem::new();
+            myprog.register_stage(stage1);
+            myprog.register_stage(stage2);
+            let mut myprog = myprog.set_lock_attempt_duration(0);
+            let mut guard = PROGHOLDER.lock().unwrap();
+            myprog.start(key.clone(), &PROGHOLDER);
+            guard.progresses.insert(key.clone(), myprog);
+            drop(guard);
+
+            // first check that progress item should not contain
+            // the vars created by stage1 because stage1
+            // hasnt finished yet
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                assert!(!me.var_exists("testkey1"));
+                assert!(!me.var_exists("testkey2"));
+            }, |_| {
+                assert!(false);
+            });
+
+            // then wait until stage1 finishes, the rest of
+            // the test is done by stage2 when it checks
+            // if the vars exist
+            delay_millis(1010).await;
+        };};
     }
 
     #[test]
