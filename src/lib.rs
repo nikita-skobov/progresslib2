@@ -5,9 +5,10 @@ use std::sync::Mutex;
 use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::time::Duration;
+use std::{any::Any, time::Duration};
 
 
+pub type ProgressVars = HashMap<String, Box<dyn Any>>;
 pub type TaskResult = Result<(), String>;
 type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 type PinBoxFutureSimple = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -739,6 +740,22 @@ mod tests {
             Some(ref progitem) => {
                 Some(progitem.get_progress())
             }
+        }
+    }
+
+    #[test]
+    fn can_use_progress_vars() {
+        let mut progvars = ProgressVars::new();
+        let key = "key";
+        progvars.insert(
+            String::from(key),
+            Box::new(String::from("some value"))
+        );
+        let boxed = progvars.remove(key).unwrap();
+        if let Ok(x) = boxed.downcast::<String>() {
+            assert_eq!(x.as_str(), "some value");
+        } else {
+            assert!(false);
         }
     }
 
