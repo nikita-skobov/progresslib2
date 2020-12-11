@@ -5,10 +5,18 @@ use std::sync::Mutex;
 use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::time::Duration;
+use std::{any::Any, time::Duration};
+use delegate::delegate;
+use std::collections::hash_map::Drain;
 
+mod progress_compute;
+pub use progress_compute::*;
 
-pub type TaskResult = Result<(), String>;
+mod progress_vars;
+pub use progress_vars::*;
+
+// pub type ProgressVars = HashMap<String, Box<dyn Any + Send>>;
+pub type TaskResult = Result<Option<ProgressVars>, String>;
 type PinBoxFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
 type PinBoxFutureSimple = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -82,7 +90,7 @@ impl Stage {
     ) -> Self {
         self.task = Some(Box::pin(async move {
             future.await;
-            Ok(())
+            Ok(None)
         }));
         self
     }
@@ -118,13 +126,10 @@ impl Stage {
     ) -> Self {
         Stage::new(name).set_task_from_future(async move {
             future.await;
-            Ok(())
+            Ok(None)
         })
     }
 }
-
-pub const MAX_PROGRESS_TICKS: u32 = 100_000;
-pub const TICKS_PER_PERCENT: u32 = MAX_PROGRESS_TICKS / 100;
 
 #[derive(Debug, Clone)]
 pub struct ProgressError {
@@ -177,7 +182,7 @@ impl From<&mut ProgressItem> for Vec<StageView> {
         });
         stage_index += 1;
 
-        if orig.stages.len() == 0 {
+        if orig.stages.len() == 0 && !orig.processing_stage {
             // this means that the "current"
             // stage above is actually done, so we can treat it
             // as done:
@@ -221,7 +226,7 @@ pub struct ProgressItem {
     started: bool,
     numstages: usize,
     current_stage: Option<(usize, Stage)>,
-    progress: u32, // 0 - 100,000 (each 1,000 is 1%)
+    progress: ProgressCompute,
     errored: Option<ProgressError>,
     done: bool,
     max_lock_attempts: usize,
@@ -229,6 +234,7 @@ pub struct ProgressItem {
     paused: bool,
     pause_resume: VecDeque<PinBoxFutureSimple>,
     processing_stage: bool,
+    vars: ProgressVars,
 }
 
 impl Default for ProgressItem {
@@ -241,17 +247,21 @@ impl Default for ProgressItem {
             current_stage: None,
             errored: None,
             done: false,
-            progress: 0,
+            progress: ProgressCompute::default(),
             max_lock_attempts: 3,
             lock_attempt_wait: 1000,
             paused: false,
             pause_resume: VecDeque::new(),
             processing_stage: false,
+            vars: ProgressVars::default(),
         }
     }
 }
 
 impl ProgressItem {
+    delegate_progressvars_on!(vars);
+    delegate_progresscompute_on!(progress);
+
     // TODO: decide what to do with name... should it be part of progress item or not?
     pub fn new() -> Self {
         Self::default()
@@ -274,71 +284,6 @@ impl ProgressItem {
     pub fn get_progress_error(&self) -> &Option<ProgressError> {
         &self.errored
     }
-
-    /// set the progress level. new_progress must be in 'ticks'
-    /// where 1000 ticks represents 1%
-    pub fn set_progress(&mut self, new_progress: u32) {
-        if new_progress > MAX_PROGRESS_TICKS as u32 {
-            self.progress = MAX_PROGRESS_TICKS;
-        } else {
-            // this is safe to do because we checked if its over 100,000 which if its not
-            // then it will definitely fit into u32
-            self.progress = new_progress;
-        }
-    }
-
-    /// prog_percent is a float64 from 0.0-100.0 inclusively
-    pub fn set_progress_percent(&mut self, prog_percent: f64) {
-        if prog_percent < 0 as f64 {
-            return;
-        }
-
-        let new_ticks = prog_percent * TICKS_PER_PERCENT as f64;
-        self.set_progress(new_ticks as u32);
-    }
-
-    /// prog_norm is a float64 from 0.0-1.0 inclusively where 0.0
-    /// represents 0%, and 1.0 represents 100%
-    pub fn set_progress_percent_normalized(&mut self, prog_norm: f64) {
-        self.set_progress_percent(prog_norm * 100.0);
-    }
-
-    /// like set_progress but only allows progress to increase
-    pub fn inc_progress(&mut self, new_progress: u32) {
-        if new_progress > self.progress {
-            self.set_progress(new_progress);
-        }
-    }
-
-    /// like set_progress_percent but only allows increasing the progress
-    pub fn inc_progress_percent(&mut self, new_progress: f64) {
-        if new_progress < 0 as f64 {
-            return;
-        }
-
-        let new_ticks = new_progress * TICKS_PER_PERCENT as f64;
-        self.inc_progress(new_ticks as u32);
-    }
-
-    /// like set_progress_percent_normalized but only allows increasing
-    pub fn inc_progress_percent_normalized(&mut self, prog_norm: f64) {
-        self.inc_progress_percent(prog_norm * 100.0);
-    }
-
-    /// returns a value between 0 and 1 (inclusive) of the percentage
-    /// normalized. ie: 1 <-> 100%, 0 <-> 0%
-    pub fn get_progress_percent_normalized(&self) -> f64 {
-        let percent_norm = self.progress as f64 / MAX_PROGRESS_TICKS as f64;
-        percent_norm
-    }
-
-    /// returns a value between 0.0 and 100.0 of the percentage
-    pub fn get_progress_percent(&self) -> f64 {
-        let percent_norm = self.get_progress_percent_normalized();
-        percent_norm * 100.0
-    }
-
-    pub fn get_progress(&self) -> u32 { self.progress }
 
     pub fn has_started(&self) -> bool { self.started }
 
@@ -460,19 +405,15 @@ impl ProgressItem {
                     name: stage.name,
                     task: None,
                 }));
-                self.progress = 0;
+                self.set_progress(0);
 
                 tokio::spawn(async move {
                     let task_result = task.await;
-                    let is_error = match task_result {
-                        Ok(_) => None,
-                        Err(s) => Some(s),
-                    };
-                    Self::handle_end_of_stage(
+                    handle_end_of_stage(
                         key,
                         holder,
                         stage_index,
-                        is_error,
+                        task_result,
                         max_lock_attempts,
                         lock_attempt_wait
                     );
@@ -485,103 +426,136 @@ impl ProgressItem {
 
         // if we failed to get a stage, or we failed to get a task
         // from that stage, then we will consider that an error
-        Self::handle_end_of_stage(
+        handle_end_of_stage(
             key,
             holder,
             stage_index,
-            Some("Failed to run stage".into()),
+            Err("Failed to run stage".into()),
             max_lock_attempts,
             lock_attempt_wait,
         );
     }
+}
 
-    pub fn handle_end_of_stage<K: Eq + Hash + Debug + Send>(
-        key: K,
-        holder: &'static Mutex<ProgressHolder<K>>,
-        stage_index: usize,
-        is_error: Option<String>,
-        max_lock_attempts: usize,
-        lock_attempt_wait: u64,
-    ) {
-        tokio::spawn(async move {
-            // delay first because otherwise doesnt seem we can build the await
-            // state machine :(
-            tokio::time::delay_for(Duration::from_millis(lock_attempt_wait)).await;
-            // then we try to get a lock
-            let mut guard = match holder.try_lock() {
-                Err(_) => {
-                    // if we fail to get a lock, try again by calling this recursively
-                    let new_lock_attempts = if max_lock_attempts == 0 {
-                        max_lock_attempts
-                    } else if max_lock_attempts - 1 == 0 {
-                        // if it would reduce to 0, then stop here otherwise wed
-                        // have infinite loop on account of the above condition
-                        return;
-                    } else {
-                        max_lock_attempts - 1
-                    };
-
-                    Self::handle_end_of_stage(
-                        key,
-                        holder,
-                        stage_index,
-                        is_error,
-                        new_lock_attempts,
-                        lock_attempt_wait,
-                    );
+pub fn handle_end_of_stage<K: Eq + Hash + Debug + Send>(
+    key: K,
+    holder: &'static Mutex<ProgressHolder<K>>,
+    stage_index: usize,
+    task_result: TaskResult,
+    max_lock_attempts: usize,
+    lock_attempt_wait: u64,
+) {
+    tokio::spawn(async move {
+        // delay first because otherwise doesnt seem we can build the await
+        // state machine :(
+        tokio::time::delay_for(Duration::from_millis(lock_attempt_wait)).await;
+        // then we try to get a lock
+        let mut guard = match holder.try_lock() {
+            Err(_) => {
+                // if we fail to get a lock, try again by calling this recursively
+                let new_lock_attempts = if max_lock_attempts == 0 {
+                    max_lock_attempts
+                } else if max_lock_attempts - 1 == 0 {
+                    // if it would reduce to 0, then stop here otherwise wed
+                    // have infinite loop on account of the above condition
                     return;
-                }
-                Ok(guard) => guard,
-            };
+                } else {
+                    max_lock_attempts - 1
+                };
 
-            // if we got the lock, handle it: if is_error, then set self.errored
-            // otherwise process the next stage
-            match guard.progresses.get_mut(&key) {
-                None => {}, // nothing we can do :shrug:
-                Some(me) => match is_error {
-                    None => {
-                        me.processing_stage = false;
-                        if !me.paused {
-                            me.do_stage(key, holder, stage_index + 1);
-                        } else {
-                            // if we are paused, create a future
-                            // of what we will eventually do when we get unpaused.
-                            let asynctask = async move {
-                                match holder.lock() {
-                                    Err(_) => {}
-                                    Ok(mut guard) => {
-                                        match guard.progresses.get_mut(&key) {
-                                            None => {}
-                                            Some(next_me) => {
-                                                next_me.do_stage(key, holder, stage_index + 1);
-                                            }
-                                        }
-                                    }
-                                }
-                            };
-                            // an internal member used to hold this future for later
-                            // when we unpause
-                            me.pause_resume.push_back(Box::pin(asynctask));
+                handle_end_of_stage(
+                    key,
+                    holder,
+                    stage_index,
+                    task_result,
+                    new_lock_attempts,
+                    lock_attempt_wait,
+                );
+                return;
+            }
+            Ok(guard) => guard,
+        };
+
+        // if we got the lock, handle it: if is_error, then set self.errored
+        // otherwise process the next stage
+        match guard.progresses.get_mut(&key) {
+            None => {}, // nothing we can do :shrug:
+            Some(me) => match task_result {
+                Ok(vars_option) => me_do_next_stage(
+                    me,
+                    holder,
+                    key,
+                    stage_index,
+                    vars_option
+                ),
+                Err(error_string) => me_set_error(
+                    me,
+                    stage_index,
+                    error_string
+                ),
+            }
+        }
+    });
+}
+
+pub fn me_do_next_stage<K: Eq + Hash + Debug + Send>(
+    me: &mut ProgressItem,
+    holder: &'static Mutex<ProgressHolder<K>>,
+    key: K,
+    stage_index: usize,
+    vars_option: Option<ProgressVars>,
+) {
+    // if given variables, apply
+    // these to me so that future
+    // stages can see these vars.
+    if let Some(mut vars) = vars_option {
+        for (key, value) in vars.drain_vars() {
+            me.insert_var(key, value);
+        }
+    }
+
+    me.processing_stage = false;
+    if !me.paused {
+        me.do_stage(key, holder, stage_index + 1);
+    } else {
+        // if we are paused, create a future
+        // of what we will eventually do when we get unpaused.
+        let asynctask = async move {
+            match holder.lock() {
+                Err(_) => {}
+                Ok(mut guard) => {
+                    match guard.progresses.get_mut(&key) {
+                        None => {}
+                        Some(next_me) => {
+                            next_me.do_stage(key, holder, stage_index + 1);
                         }
-                    },
-                    Some(error_string) => {
-                        me.processing_stage = false;
-                        me.errored = Some(ProgressError {
-                            error_string,
-                            progress_index: stage_index,
-                            name: match me.current_stage {
-                                None => None,
-                                Some(ref tuple) => match tuple.1.name {
-                                    None => None,
-                                    Some(ref name) => Some(format!("{:?}", name)),
-                                }
-                            }
-                        });
-                    },
+                    }
                 }
             }
-        });
+        };
+        // an internal member used to hold this future for later
+        // when we unpause
+        me.pause_resume.push_back(Box::pin(asynctask));
     }
+}
+
+pub fn me_set_error(
+    me: &mut ProgressItem,
+    stage_index: usize,
+    error_string: String,
+) {
+    me.processing_stage = false;
+    me.errored = Some(ProgressError {
+        error_string,
+        progress_index: stage_index,
+        name: match me.current_stage {
+            None => None,
+            Some(ref tuple) => match tuple.1.name {
+                None => None,
+                Some(ref name) => Some(format!("{:?}", name)),
+            }
+        }
+    });
 }
 
 /// The ProgressHolder is a simple hashmap of the progress items.
@@ -637,6 +611,29 @@ pub fn use_me_from_progress_holder_or_error<'a, K: Eq + Hash + Debug>(
     }
 }
 
+/// useful when you want to extract something
+/// from the progress item
+pub fn return_something_from_progress_holder<'a, T, K: Eq + Hash + Debug>(
+    key: &K,
+    progholder: &'a Mutex<ProgressHolder<K>>,
+    ok_cb: impl FnMut(&mut ProgressItem) -> Option<T> + 'a,
+) -> Option<T> {
+    let mut mut_ok_cb = ok_cb;
+    match progholder.try_lock() {
+        Err(_) => {
+            None
+        },
+        Ok(mut guard) => match guard.progresses.get_mut(key) {
+            None => {
+                None
+            },
+            Some(me) => {
+                mut_ok_cb(me)
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,7 +643,7 @@ mod tests {
 
     async fn download_something(secs: u64) -> TaskResult {
         delay_millis(secs * 1000).await;
-        Ok(())
+        Ok(None)
     }
 
     async fn delay_millis(millis: u64) {
@@ -743,6 +740,62 @@ mod tests {
     }
 
     #[test]
+    fn progress_can_set_and_view_vars() {
+        run_in_tokio_with_static_progholder! {{
+            let key = String::from("key");
+            // stage1 will return some variables
+            // then stage2 will try to read them
+            let stage1 = Stage::make("wait1", async {
+                delay_millis(1000).await;
+                let mut vars = ProgressVars::default();
+                vars.insert_var("testkey1", Box::new("testvalue"));
+                vars.insert_var("testkey2", Box::new(100));
+                Ok(Some(vars))
+            });
+            let stage2 = Stage::make("wait2", async {
+                use_me_from_progress_holder_or_error(&String::from("key"), &PROGHOLDER, |me| {
+                    assert!(me.var_exists("testkey1"));
+                    assert!(me.var_exists("testkey2"));
+                    // TODO: check if you can downcast...
+                    let boxstr = me.extract_var("testkey1").unwrap();
+                    let boxstr = boxstr.downcast::<&str>().unwrap();
+                    assert_eq!(*boxstr, "testvalue");
+
+                    let boxint = me.extract_var("testkey2").unwrap();
+                    let boxint = boxint.downcast::<i32>().unwrap();
+                    assert_eq!(*boxint, 100);
+                }, |_| {
+                    assert!(false);
+                });
+                Ok(None)
+            });
+            let mut myprog = ProgressItem::new();
+            myprog.register_stage(stage1);
+            myprog.register_stage(stage2);
+            let mut myprog = myprog.set_lock_attempt_duration(0);
+            let mut guard = PROGHOLDER.lock().unwrap();
+            myprog.start(key.clone(), &PROGHOLDER);
+            guard.progresses.insert(key.clone(), myprog);
+            drop(guard);
+
+            // first check that progress item should not contain
+            // the vars created by stage1 because stage1
+            // hasnt finished yet
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                assert!(!me.var_exists("testkey1"));
+                assert!(!me.var_exists("testkey2"));
+            }, |_| {
+                assert!(false);
+            });
+
+            // then wait until stage1 finishes, the rest of
+            // the test is done by stage2 when it checks
+            // if the vars exist
+            delay_millis(1010).await;
+        };};
+    }
+
+    #[test]
     fn can_get_stage_view_vec() {
         run_in_tokio_with_static_progholder! {{
             let key = String::from("key");
@@ -750,7 +803,9 @@ mod tests {
             let stage1 = Stage::make_simple("wait1", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
             let stage2 = Stage::make_simple("wait2", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
             let stage3 = Stage::make_simple("wait3", make_advanced_stage(wait, key.clone(), &PROGHOLDER));
-            let stage4 = Stage::make_simple("wait4", async {});
+            let stage4 = Stage::make_simple("wait4", async {
+                delay_millis(1000).await;
+            });
             let mut prog = ProgressItem::new();
             prog.register_stage(stage1);
             prog.register_stage(stage2);
@@ -795,10 +850,24 @@ mod tests {
                 assert!(false);
             });
 
-            // if we wait until all stages are done,
-            // we should see that the last stage
-            // is at 100% even if it didnt update its own progress
+            // if we wait until first 3 stages are done
+            // the last stage should be at 0% at first
+            // while its processing (and it never updates itself)
             delay_millis(wait * 4 * 2).await;
+            use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
+                let stage_view_vec: Vec<StageView> = me.into();
+                let last = &stage_view_vec[3];
+                assert_eq!(last.progress_percent, 0.0);
+                assert!(last.name.contains("wait4"));
+                assert_eq!(last.index, 3);
+                assert!(last.currently_processing);
+            }, |_| {
+                assert!(false);
+            });
+
+            // then we wait for the last stage to finish, and it
+            // should have a progress of 100.0 implicitly
+            delay_millis(1000).await;
             use_me_from_progress_holder_or_error(&key, &PROGHOLDER, |me| {
                 let stage_view_vec: Vec<StageView> = me.into();
                 let last = &stage_view_vec[3];
@@ -921,38 +990,6 @@ mod tests {
 
         myprog.set_progress_percent_normalized(0.9999);
         assert_eq!(myprog.get_progress_percent_normalized(), 0.9999);
-    }
-
-    #[test]
-    fn set_progress_percent_works() {
-        let mut myprog = ProgressItem::new();
-        myprog.set_progress_percent(0.0);
-        assert_eq!(myprog.get_progress(), 0);
-        myprog.set_progress_percent(22.5);
-        let expected_ticks = 22.5 * TICKS_PER_PERCENT as f64;
-        let expected_ticks = expected_ticks as u32;
-        assert_eq!(myprog.get_progress(), expected_ticks);
-        myprog.set_progress_percent(99.9999999);
-        assert_ne!(myprog.get_progress(), MAX_PROGRESS_TICKS);
-    }
-
-    #[test]
-    fn inc_progress_works_percent() {
-        let mut myprog = ProgressItem::new();
-        myprog.set_progress(TICKS_PER_PERCENT * 3);
-        assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT * 3);
-        myprog.inc_progress(TICKS_PER_PERCENT * 10);
-        assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT * 10);
-        myprog.inc_progress(TICKS_PER_PERCENT * 3);
-        // it should still be 10%, cant go down with inc_progress
-        assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT * 10);
-    }
-
-    #[test]
-    fn set_progress_works() {
-        let mut myprog = ProgressItem::new();
-        myprog.set_progress(TICKS_PER_PERCENT);
-        assert_eq!(myprog.get_progress(), TICKS_PER_PERCENT);
     }
 
     #[test]
