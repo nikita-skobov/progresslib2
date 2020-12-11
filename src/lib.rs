@@ -611,6 +611,29 @@ pub fn use_me_from_progress_holder_or_error<'a, K: Eq + Hash + Debug>(
     }
 }
 
+/// useful when you want to extract something
+/// from the progress item
+pub fn return_something_from_progress_holder<'a, T, K: Eq + Hash + Debug>(
+    key: &K,
+    progholder: &'a Mutex<ProgressHolder<K>>,
+    ok_cb: impl FnMut(&mut ProgressItem) -> Option<T> + 'a,
+) -> Option<T> {
+    let mut mut_ok_cb = ok_cb;
+    match progholder.try_lock() {
+        Err(_) => {
+            None
+        },
+        Ok(mut guard) => match guard.progresses.get_mut(key) {
+            None => {
+                None
+            },
+            Some(me) => {
+                mut_ok_cb(me)
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
