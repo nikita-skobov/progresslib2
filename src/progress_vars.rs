@@ -17,6 +17,9 @@ macro_rules! delegate_progressvars_on {
                 pub fn insert_var<S: AsRef<str>>(&mut self, key: S, boxed: Box<dyn Any + Send>);
                 pub fn var_exists<S: AsRef<str>>(&self, key: S) -> bool;
                 pub fn drain_vars(&mut self) -> Drain<'_, String, Box<(dyn Any + Send)>>;
+                pub fn clone_var<T: Clone + 'static>(&self, key: &str) -> Option<T>;
+                pub fn peak_var<F, T: 'static>(&mut self, key: &str, ok_cb: F)
+                    where F: FnMut(&T);
             }
         }
     };
@@ -49,6 +52,36 @@ impl ProgressVars {
     pub fn drain_vars(&mut self) -> Drain<'_, String, Box<(dyn Any + Send)>> {
         self.vars.drain()
     }
+
+    pub fn peak_var<F, T: 'static>(
+        &self,
+        key: &str,
+        ok_cb: F,
+    )
+        where F: FnMut(&T)
+    {
+        let mut mut_ok_cb = ok_cb;
+        if let Some(boxed) = self.vars.get(key) {
+            let boxed_ref = boxed.as_ref();
+            if let Some(var_value) = boxed_ref.downcast_ref::<T>() {
+                mut_ok_cb(var_value);
+            }
+        }
+    }
+
+    pub fn clone_var<T: Clone + 'static>(
+        &self,
+        key: &str,
+    ) -> Option<T> {
+        if let Some(boxed) = self.vars.get(key) {
+            let boxed_ref = boxed.as_ref();
+            if let Some(var_value) = boxed_ref.downcast_ref::<T>() {
+                return Some(var_value.clone());
+            }
+        }
+
+        None
+    }
 }
 
 #[cfg(test)]
@@ -69,5 +102,33 @@ mod tests {
         } else {
             assert!(false);
         }
+    }
+
+    #[test]
+    fn can_peak_var() {
+        let mut progvars = ProgressVars::default();
+        let key = "key";
+        progvars.insert_var(
+            String::from(key),
+            Box::new(String::from("aaaaa"))
+        );
+        let mut cb_called = false;
+        progvars.peak_var::<_, String>("key", |mystring| {
+            assert_eq!(mystring, "aaaaa");
+            cb_called = true;
+        });
+        assert!(cb_called)
+    }
+
+    #[test]
+    fn can_clone_var() {
+        let mut progvars = ProgressVars::default();
+        let key = "key";
+        progvars.insert_var(
+            String::from(key),
+            Box::new(String::from("aaaaa"))
+        );
+        let mystring = progvars.clone_var::<String>("key").unwrap();
+        assert_eq!(mystring, "aaaaa");
     }
 }
